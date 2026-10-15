@@ -8,8 +8,6 @@ import glob
 import shutil
 
 from PIL import Image, ImageDraw, ImageFont
-import arabic_reshaper
-from bidi.algorithm import get_display
 
 # =========================
 # CONFIGURATION
@@ -57,9 +55,11 @@ def run_command(command):
 # FONT AND RIGHT-TO-LEFT TEXT
 # =========================
 def find_font():
+    # Noto Sans Arabic generally has broader Arabic-script coverage, including
+    # Kurdish letters. Fall back to Noto Naskh and DejaVu if needed.
     candidates = [
-        "/usr/share/fonts/truetype/noto/NotoNaskhArabic-Regular.ttf",
         "/usr/share/fonts/truetype/noto/NotoSansArabic-Regular.ttf",
+        "/usr/share/fonts/truetype/noto/NotoNaskhArabic-Regular.ttf",
         "/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf",
     ]
     for path in candidates:
@@ -80,16 +80,27 @@ def find_font():
 
 
 FONT_PATH = find_font()
+LATIN_FONT_PATH = "/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf"
+if not os.path.isfile(LATIN_FONT_PATH):
+    LATIN_FONT_PATH = FONT_PATH
 
 
 def make_font(size):
-    return ImageFont.truetype(FONT_PATH, size)
+    # RAQM performs Arabic shaping and right-to-left layout inside Pillow.
+    # This avoids shaping/reordering the same text twice.
+    try:
+        return ImageFont.truetype(FONT_PATH, size, layout_engine=ImageFont.Layout.RAQM)
+    except (AttributeError, ValueError):
+        return ImageFont.truetype(FONT_PATH, size)
+
+
+def make_latin_font(size):
+    return ImageFont.truetype(LATIN_FONT_PATH, size)
 
 
 def shape_rtl(text):
-    """Shape Arabic/Kurdish letters and reorder them for Pillow's normal draw."""
-    reshaped = arabic_reshaper.reshape(str(text))
-    return get_display(reshaped)
+    """Keep original Unicode text; Pillow/RAQM shapes and orders it when drawn."""
+    return str(text)
 
 
 def wrap_rtl_text(text, font, max_width):
@@ -100,7 +111,11 @@ def wrap_rtl_text(text, font, max_width):
     current = words[0]
     for word in words[1:]:
         candidate = current + " " + word
-        if font.getlength(shape_rtl(candidate)) <= max_width:
+        try:
+            candidate_width = font.getlength(candidate, direction="rtl", language="ar")
+        except (TypeError, ValueError):
+            candidate_width = font.getlength(candidate)
+        if candidate_width <= max_width:
             current = candidate
         else:
             lines.append(current)
@@ -127,13 +142,23 @@ def draw_rtl_block(draw, text, top, max_width, font_size, fill,
     y = top
     for line in selected_lines:
         displayed = shape_rtl(line)
-        box = draw.textbbox((0, 0), displayed, font=selected_font)
+        try:
+            box = draw.textbbox(
+                (0, 0), displayed, font=selected_font,
+                direction="rtl", language="ar"
+            )
+        except (TypeError, ValueError):
+            box = draw.textbbox((0, 0), displayed, font=selected_font)
         line_height = box[3] - box[1]
-        # IMPORTANT: no direction="rtl" here. shape_rtl() already reordered it.
-        draw.text(
-            (WIDTH // 2, y), displayed, font=selected_font,
-            fill=fill, anchor="ma"
-        )
+        try:
+            draw.text(
+                (WIDTH // 2, y), displayed, font=selected_font,
+                fill=fill, anchor="ma", direction="rtl", language="ar"
+            )
+        except (TypeError, ValueError):
+            # Fallback for Pillow builds without RAQM support.
+            draw.text((WIDTH // 2, y), displayed, font=selected_font,
+                      fill=fill, anchor="ma")
         y += line_height + line_gap
     return y
 
@@ -242,30 +267,42 @@ def create_ayah_image(ayah, index, image_path):
                            outline=(93, 137, 133), width=1)
 
     draw.text((WIDTH // 2, 105), shape_rtl(ayah["surah_name"]),
-              font=make_font(30), fill=(236, 213, 155), anchor="mm")
-    draw.text((WIDTH // 2, 155),
-              "ئایەت " + str(ayah["ayah_number"]) + "  |  " + str(index) + " / " + str(AYAH_COUNT),
-              font=make_font(23), fill=(224, 233, 229), anchor="mm")
+              font=make_font(30), fill=(236, 213, 155), anchor="mm", direction="rtl", language="ar")
+    # Keep Kurdish and numeric text separate so bidirectional reordering
+    # cannot scramble the verse number and the fraction.
+    draw.text((WIDTH // 2, 150),
+              "ئایەت: " + str(ayah["ayah_number"]),
+              font=make_font(23), fill=(224, 233, 229), anchor="mm",
+              direction="rtl", language="ar")
+    draw.text((WIDTH // 2, 183),
+              str(index) + " / " + str(AYAH_COUNT),
+              font=make_latin_font(20), fill=(224, 233, 229), anchor="mm")
 
     draw.rounded_rectangle((65, 220, WIDTH - 65, 610), radius=24,
                            fill=(20, 52, 57), outline=(126, 153, 122), width=2)
     draw.text((WIDTH // 2, 255), shape_rtl("بِسْمِ اللَّهِ"),
-              font=make_font(25), fill=(197, 166, 94), anchor="mm")
+              font=make_font(25), fill=(197, 166, 94), anchor="mm", direction="rtl", language="ar")
     draw_rtl_block(draw, ayah["arabic"], 315, WIDTH - 155, 46,
                    (255, 250, 231), max_lines=7, line_gap=15)
 
     draw.rounded_rectangle((65, 650, WIDTH - 65, 1000), radius=24,
                            fill=(17, 45, 51), outline=(126, 153, 122), width=2)
     draw.text((WIDTH // 2, 690), shape_rtl("واتای کوردی"),
-              font=make_font(30), fill=(236, 213, 155), anchor="mm")
+              font=make_font(30), fill=(236, 213, 155), anchor="mm", direction="rtl", language="ar")
     draw_rtl_block(draw, ayah["translation"], 750, WIDTH - 155, 34,
                    (245, 247, 241), max_lines=7, line_gap=14)
 
     draw.line((100, 1050, WIDTH - 100, 1050), fill=(126, 153, 122), width=2)
-    draw.text((WIDTH // 2, 1090), shape_rtl("QuranEnc.com - وەرگێڕانی واتا"),
-              font=make_font(20), fill=(218, 220, 204), anchor="mm")
-    draw.text((WIDTH // 2, 1150), shape_rtl("قورئانی پیرۆز"),
-              font=make_font(25), fill=(236, 213, 155), anchor="mm")
+    # Keep Latin and Kurdish source credit separate; mixing both scripts
+    # in one line can produce confusing visual ordering.
+    draw.text((WIDTH // 2, 1078), "QuranEnc.com",
+              font=make_latin_font(19), fill=(218, 220, 204), anchor="mm")
+    draw.text((WIDTH // 2, 1110), shape_rtl("سەرچاوەی وەرگێڕان: واتای کوردی"),
+              font=make_font(18), fill=(218, 220, 204), anchor="mm",
+              direction="rtl", language="ar")
+    draw.text((WIDTH // 2, 1160), shape_rtl("قورئانی پیرۆز"),
+              font=make_font(25), fill=(236, 213, 155), anchor="mm",
+              direction="rtl", language="ar")
     image.save(image_path, quality=95)
 
 # =========================
