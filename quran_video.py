@@ -671,301 +671,136 @@ def get_random_verses():
 # CREATE VERSE IMAGE
 # =========================
 
-# =========================
-# PREMIUM ISLAMIC VIDEO DESIGN
-# Replace your old create_ayah_image() with this
-# =========================
-
 def create_ayah_image(ayah, index, image_path):
-
-    # Premium Islamic color palette
-    BG_TOP = (7, 29, 32)
-    BG_BOTTOM = (17, 55, 49)
-    GOLD = (220, 184, 106)
-    GOLD_LIGHT = (246, 222, 165)
-    WHITE = (250, 248, 237)
-    MUTED = (190, 211, 198)
-    PANEL = (13, 42, 43)
-    PANEL_LIGHT = (19, 50, 49)
-    BORDER = (72, 112, 91)
-
-    image = Image.new("RGB", (WIDTH, HEIGHT), BG_TOP)
+    image = Image.new("RGB", (WIDTH, HEIGHT), (12, 35, 42))
     draw = ImageDraw.Draw(image)
 
-    # -------------------------
-    # 1. Elegant gradient
-    # -------------------------
+    # Background gradient
     for y in range(HEIGHT):
-        ratio = y / max(1, HEIGHT - 1)
+        ratio = y / HEIGHT
 
-        color = tuple(
-            int(BG_TOP[i] * (1 - ratio) + BG_BOTTOM[i] * ratio)
-            for i in range(3)
+        color = (
+            int(9 + 8 * ratio),
+            int(35 + 20 * ratio),
+            int(43 + 17 * ratio)
         )
 
         draw.line((0, y, WIDTH, y), fill=color)
 
-    # Subtle decorative circles
-    for radius in (100, 145, 190):
-        draw.ellipse(
-            (-radius // 2, 120 - radius // 2,
-             radius // 2, 120 + radius // 2),
-            outline=(24, 66, 57),
-            width=2
-        )
-
-        draw.ellipse(
-            (WIDTH - radius // 2, 120 - radius // 2,
-             WIDTH + radius // 2, 120 + radius // 2),
-            outline=(24, 66, 57),
-            width=2
-        )
-
-    # -------------------------
-    # 2. Double outer frame
-    # -------------------------
+    # Outer frame
     draw.rounded_rectangle(
-        (22, 22, WIDTH - 22, HEIGHT - 22),
-        radius=30,
-        outline=GOLD,
+        (25, 25, WIDTH - 25, HEIGHT - 25),
+        radius=28,
+        outline=(197, 166, 94),
         width=3
     )
 
     draw.rounded_rectangle(
-        (36, 36, WIDTH - 36, HEIGHT - 36),
-        radius=25,
-        outline=BORDER,
+        (42, 42, WIDTH - 42, HEIGHT - 42),
+        radius=22,
+        outline=(93, 137, 133),
         width=1
     )
 
-    # -------------------------
-    # 3. Decorative corner diamonds
-    # -------------------------
-    def draw_diamond(cx, cy, size, color):
-        points = [
-            (cx, cy - size),
-            (cx + size, cy),
-            (cx, cy + size),
-            (cx - size, cy)
-        ]
-
-        draw.polygon(points, outline=color)
-        draw.ellipse(
-            (cx - 2, cy - 2, cx + 2, cy + 2),
-            fill=color
-        )
-
-    for x in (57, WIDTH - 57):
-        for y in (57, HEIGHT - 57):
-            draw_diamond(x, y, 12, GOLD)
-
-    # -------------------------
-    # 4. Small brand header
-    # -------------------------
-    draw.rounded_rectangle(
-        (170, 58, WIDTH - 170, 112),
-        radius=24,
-        fill=(22, 61, 52),
-        outline=GOLD,
-        width=1
-    )
-
+    # Surah name: your own Quran font
     draw.text(
-        (WIDTH // 2, 85),
-        shape_rtl("ڕێگای ئیسلام"),
-        font=make_font(24),
-        fill=GOLD_LIGHT,
-        anchor="mm",
-        direction="rtl",
-        language="ar"
-    )
-
-    # Small ornamental divider
-    draw.line(
-        (185, 132, 300, 132),
-        fill=BORDER,
-        width=2
-    )
-
-    draw.line(
-        (420, 132, 535, 132),
-        fill=BORDER,
-        width=2
-    )
-
-    draw_diamond(WIDTH // 2, 132, 7, GOLD)
-
-    # -------------------------
-    # 5. Surah name
-    # -------------------------
-    draw.text(
-        (WIDTH // 2, 165),
+        (WIDTH // 2, 100),
         shape_rtl(ayah["surah_name"]),
-        font=make_quran_font(30),
-        fill=GOLD_LIGHT,
+        font=make_quran_font(29),
+        fill=(236, 213, 155),
         anchor="mm",
         direction="rtl",
         language="ar"
     )
 
-    # Ayah counter badge
-    counter_text = (
-        "ئایەتی "
-        + str(ayah["ayah_number"])
-        + "  |  "
-        + str(index).zfill(2)
-        + " / "
-        + str(AYAH_COUNT)
-    )
-
-    draw.rounded_rectangle(
-        (225, 190, 495, 228),
-        radius=18,
-        fill=(24, 60, 52),
-        outline=BORDER,
-        width=1
-    )
-
+    # Actual ayah number: system font for Kurdish
     draw.text(
-        (WIDTH // 2, 209),
-        shape_rtl(counter_text),
-        font=make_font(18),
-        fill=MUTED,
+        (WIDTH // 2, 145),
+        shape_rtl("ئایەتی " + str(ayah["ayah_number"])),
+        font=make_font(23),
+        fill=(224, 233, 229),
         anchor="mm",
         direction="rtl",
         language="ar"
     )
 
-    # -------------------------
-    # 6. Quran verse panel
-    # -------------------------
+    # Arabic ayah frame
     draw.rounded_rectangle(
-        (49, 246, WIDTH - 49, 605),
-        radius=25,
-        fill=PANEL,
-        outline=GOLD,
+        (45, 180, WIDTH - 45, 600),
+        radius=24,
+        fill=(20, 52, 57),
+        outline=(126, 153, 122),
         width=2
     )
 
-    draw.rounded_rectangle(
-        (59, 256, WIDTH - 59, 595),
-        radius=20,
-        outline=BORDER,
-        width=1
-    )
-
-    # Decorative top ornament
-    draw_diamond(WIDTH // 2, 270, 7, GOLD)
-
-    # Quran text uses your quran.ttf font
+    # Quran text uses quran.ttf and auto-fits inside the box
     draw_rtl_block(
         draw,
         ayah["arabic"],
-        290,
-        WIDTH - 125,
+        195,
+        WIDTH - 120,
         39,
-        WHITE,
-        max_lines=25,
-        line_gap=7,
-        max_height=285,
+        (255, 250, 231),
+        max_lines=30,
+        line_gap=5,
+        max_height=390,
         use_quran_font=True
     )
 
-    # -------------------------
-    # 7. Tafsir panel
-    # -------------------------
+    # Easy tafsir frame
     draw.rounded_rectangle(
-        (49, 625, WIDTH - 49, 1080),
-        radius=25,
-        fill=PANEL_LIGHT,
-        outline=BORDER,
+        (45, 615, WIDTH - 45, 1090),
+        radius=24,
+        fill=(17, 45, 51),
+        outline=(126, 153, 122),
         width=2
     )
 
-    # Tafsir heading background
-    draw.rounded_rectangle(
-        (155, 645, WIDTH - 155, 700),
-        radius=20,
-        fill=(29, 69, 55),
-        outline=(126, 148, 94),
-        width=1
-    )
-
+    # Kurdish heading uses system font
     draw.text(
-        (WIDTH // 2, 673),
+        (WIDTH // 2, 655),
         shape_rtl("تەفسیری ئاسان"),
         font=make_font(27),
-        fill=GOLD_LIGHT,
+        fill=(236, 213, 155),
         anchor="mm",
         direction="rtl",
         language="ar"
     )
 
-    # Separator below heading
-    draw.line(
-        (105, 716, WIDTH - 105, 716),
-        fill=BORDER,
-        width=2
-    )
-
-    draw_diamond(WIDTH // 2, 716, 5, GOLD)
-
-    # Kurdish tafsir uses the system font
+    # Tafsir uses system font, automatically shrinks to fit
     draw_rtl_block(
         draw,
         ayah["tafsir"],
-        738,
-        WIDTH - 125,
+        690,
+        WIDTH - 120,
         28,
-        WHITE,
+        (245, 247, 241),
         max_lines=45,
-        line_gap=6,
-        max_height=320,
+        line_gap=4,
+        max_height=375,
         use_quran_font=False
     )
 
-    # -------------------------
-    # 8. Elegant footer
-    # -------------------------
+    # Footer separator
     draw.line(
-        (105, 1105, WIDTH - 105, 1105),
-        fill=GOLD,
+        (100, 1115, WIDTH - 100, 1115),
+        fill=(126, 153, 122),
         width=2
     )
 
-    draw_diamond(WIDTH // 2, 1105, 6, GOLD)
-
+    # Required footer
     draw.text(
-        (WIDTH // 2, 1145),
-        shape_rtl("قورئانی پیرۆز"),
-        font=make_quran_font(27),
-        fill=GOLD_LIGHT,
+        (WIDTH // 2, 1160),
+        shape_rtl("قورئانی پیرۆز - ڕێگای ئیسلام"),
+        font=make_font(23),
+        fill=(236, 213, 155),
         anchor="mm",
         direction="rtl",
         language="ar"
     )
 
-    draw.text(
-        (WIDTH // 2, 1183),
-        shape_rtl("هەر ڕۆژە و ئایەتێک"),
-        font=make_font(20),
-        fill=MUTED,
-        anchor="mm",
-        direction="rtl",
-        language="ar"
-    )
+    image.save(image_path)
 
-    # Bottom decorative line
-    draw.line(
-        (240, 1215, 480, 1215),
-        fill=BORDER,
-        width=2
-    )
-
-    draw_diamond(WIDTH // 2, 1215, 5, GOLD)
-
-    # Save the final image
-    image.save(image_path, quality=95)
 
 # =========================
 # DOWNLOAD RECITATION AUDIO
