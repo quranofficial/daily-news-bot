@@ -14,15 +14,22 @@ import urllib.parse
 
 import quran_video as qv
 
+
+# =========================
+# CONFIGURATION
+# =========================
+
 BOT_TOKEN = os.environ["BOT_TOKEN"]
 TG = "https://api.telegram.org/bot" + BOT_TOKEN + "/"
 QURAN_API = "https://api.alquran.cloud/v1"
 
 MAX_AYAHS = max(1, int(os.environ.get("MAX_AYAHS_PER_VIDEO", "20")))
 POLL_TIMEOUT = 30
+
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
 JOBS_DIR = os.path.join(BASE_DIR, "quran_user_jobs")
 TIMINGS_DIR = os.path.join(BASE_DIR, "reciter_timings")
+RECITERS_JSON_PATH = os.path.join(BASE_DIR, "reciters.json")
 
 TIMINGS_BASE_URL = (
     "https://github.com/quranofficial/daily-news-bot/raw/main/"
@@ -32,267 +39,87 @@ SESSIONS = {}
 _SURAH_CACHE = None
 
 
-# Only reciters with doxx == "true".
-# Each audio URL is BASE + SSS.mp3, for example 003.mp3.
-RECITERS = {
-    "3": {
-        "name": "هەندرێن عبدالرحمان",
-        "base": "https://download.tvquran.com/download/recitations/343/266/",
-    },
-    "1": {
-        "name": "پێشەوا قادر",
-        "base": "https://github.com/Hiwaselah/qari_kurdi_mutasil/releases/download/peshawa_kurdi_mutasil/",
-    },
-    "2": {
-        "name": "ڕەعد محمد",
-        "base": "https://github.com/Hiwaselah/qari_kurdi_mutasil/releases/download/Raad/",
-    },
-    "62": {
-        "name": "ڕزگار محمد",
-        "base": "https://github.com/Hiwaselah/qari_kurdi_mutasil/releases/download/rzgar_kurdi_mutasil/",
-    },
-    "5": {
-        "name": "فەرمان شوانی",
-        "base": "https://github.com/Hiwaselah/qari_kurdi_mutasil/releases/download/farman/",
-    },
-    "6": {
-        "name": "عبدالهادی",
-        "base": "https://github.com/Hiwaselah/qari_kurdi_mutasil/releases/download/abdulhadi_kurdi_mutasil/",
-    },
-    "11": {
-        "name": "سعد الغامدي",
-        "base": "https://github.com/Hiwaselah/audio003/releases/download/Sa3d_ghamdi/",
-    },
-    "8": {
-        "name": "ياسر الدوسري",
-        "base": "http://download.quranicaudio.com/quran/yasser_ad-dussary/",
-    },
-    "23": {
-        "name": "إدريس أبكر",
-        "base": "https://github.com/Hiwaselah/qari_kurdi_mutasil/releases/download/idrees_abkar/",
-    },
-    "21": {
-        "name": "محمد اللحيدان",
-        "base": "https://server8.mp3quran.net/lhdan/",
-    },
-    "66": {
-        "name": "نبیل الرفاعي",
-        "base": "https://github.com/Hiwaselah/19_xatm_mutasl_2024/releases/download/nabil_rifa3i/",
-    },
-    "10": {
-        "name": "ماهر المعيقلي",
-        "base": "https://github.com/Hiwaselah/sounds011_11qari3_gapless/releases/download/maher_al_muaiqly/",
-    },
-    "76": {
-        "name": "ماهر المعيقلي (مجود)",
-        "base": "https://github.com/Hiwaselah/19_xatm_mutasl_2024/releases/download/muaiqly_kfgqpc/",
-    },
-    "37": {
-        "name": "عبدالباسط عبدالصمد",
-        "base": "https://download.quranicaudio.com/quran/abdul_basit_murattal/",
-    },
-    "75": {
-        "name": "عبدالباسط عبدالصمد (مجود)",
-        "base": "http://download.quranicaudio.com/quran/abdulbaset_mujawwad/",
-    },
-    "31": {
-        "name": "محمود خليل الحصري",
-        "base": "https://download.quranicaudio.com/quran/mahmood_khaleel_al-husaree/",
-    },
-    "77": {
-        "name": "محمود خليل الحصري (مجود)",
-        "base": "https://github.com/Hiwaselah/19_xatm_mutasl_2024/releases/download/husary_muallim/",
-    },
-    "42": {
-        "name": "محمد صديق المنشاوي",
-        "base": "https://download.quranicaudio.com/quran/muhammad_siddeeq_al-minshaawee/",
-    },
-    "81": {
-        "name": "محمد صديق المنشاوي (مجود)",
-        "base": "https://download.tvquran.com/download/TvQuran.com__Al-Minshawi-Mojawad/",
-    },
-    "12": {
-        "name": "أيمن سويد",
-        "base": "https://github.com/Hiwaselah/19_xatm_mutasl_2024/releases/download/dr_ayman_suwaid/",
-    },
-    "74": {
-        "name": "أكرم العلاقمي",
-        "base": "http://download.quranicaudio.com/quran/akram_al_alaqmi/",
-    },
-    "78": {
-        "name": "عبدالرحمن السديس",
-        "base": "https://download.quranicaudio.com/quran/abdurrahmaan_as-sudays/",
-    },
-    "79": {
-        "name": "أبو بكر الشاطري",
-        "base": "https://server11.mp3quran.net/shatri/",
-    },
-    "65": {
-        "name": "إسلام صبحي",
-        "base": "https://github.com/H4zh4n/TafseeriNoor/raw/files/mp3/Islam_Sobhi/",
-    },
-    "73": {
-        "name": "عبدالله كامل",
-        "base": "https://server16.mp3quran.net/kamel/Rewayat-Hafs-A-n-Assem/",
-    },
-    "46": {
-        "name": "هيثم الدخين",
-        "base": "https://server16.mp3quran.net/h_dukhain/Rewayat-Hafs-A-n-Assem/",
-    },
-    "14": {
-        "name": "سعود الشريم",
-        "base": "http://download.quranicaudio.com/quran/sa3ood_al-shuraym/",
-    },
-    "16": {
-        "name": "أحمد النفيس",
-        "base": "https://server16.mp3quran.net/nufais/Rewayat-Hafs-A-n-Assem/",
-    },
-    "19": {
-        "name": "محمد أيوب",
-        "base": "https://github.com/Hiwaselah/audio003/releases/download/Mhamad_ayub/",
-    },
-    "20": {
-        "name": "نورين محمد صديق",
-        "base": "https://github.com/Hiwaselah/19_xatm_mutasl_2024/releases/download/noreen_siddiq/",
-    },
-    "22": {
-        "name": "غسان الشوربجي",
-        "base": "https://download.tvquran.com/download/recitations/313/220/",
-    },
-    "24": {
-        "name": "أحمد بن علي العجمي",
-        "base": "https://server10.mp3quran.net/ajm/",
-    },
-    "25": {
-        "name": "عبدالله الخلف",
-        "base": "https://server14.mp3quran.net/khalf/",
-    },
-    "26": {
-        "name": "ناصر القطامي",
-        "base": "http://download.quranicaudio.com/quran/nasser_bin_ali_alqatami/",
-    },
-    "27": {
-        "name": "صلاح الهاشم",
-        "base": "https://server12.mp3quran.net/salah_hashim_m/",
-    },
-    "28": {
-        "name": "صلاح البدير",
-        "base": "http://download.quranicaudio.com/quran/salahbudair/",
-    },
-    "30": {
-        "name": "توفيق الصايغ",
-        "base": "https://github.com/Hiwaselah/19_xatm_mutasl_2024/releases/download/tawfeeq_as_sawaigh/",
-    },
-    "32": {
-        "name": "بدر التركي",
-        "base": "https://server10.mp3quran.net/bader/Rewayat-Hafs-A-n-Assem/",
-    },
-    "34": {
-        "name": "سهل ياسين",
-        "base": "http://download.quranicaudio.com/quran/sahl_yaaseen/",
-    },
-    "36": {
-        "name": "صلاح بو خاطر",
-        "base": "https://github.com/Hiwaselah/sounds011_11qari3_gapless/releases/download/salah_bukhatir/",
-    },
-    "38": {
-        "name": "علي جابر",
-        "base": "https://github.com/Hiwaselah/sounds011_11qari3_gapless/releases/download/ali_jaber/",
-    },
-    "39": {
-        "name": "عبدالعزيز الأحمد",
-        "base": "https://server11.mp3quran.net/a_ahmed/",
-    },
-    "40": {
-        "name": "عادل ريان",
-        "base": "https://server8.mp3quran.net/ryan/",
-    },
-    "41": {
-        "name": "خليفة الطنيجي",
-        "base": "https://github.com/Hiwaselah/sounds011_11qari3_gapless/releases/download/khalifa_taniji/",
-    },
-    "44": {
-        "name": "فارس عباد",
-        "base": "https://github.com/Hiwaselah/sounds011_11qari3_gapless/releases/download/fares_abbad/",
-    },
-    "45": {
-        "name": "بندر بليله",
-        "base": "https://server6.mp3quran.net/balilah/",
-    },
-    "47": {
-        "name": "خالد الجليل",
-        "base": "https://github.com/Hiwaselah/19_xatm_mutasl_2024/releases/download/khalid_jalil/",
-    },
-    "48": {
-        "name": "عبدالودود حنيف",
-        "base": "https://server8.mp3quran.net/wdod/",
-    },
-    "49": {
-        "name": "فؤاد الخامري",
-        "base": "https://download.tvquran.com/download/tvQuran.com__Alkhamre/",
-    },
-    "51": {
-        "name": "هاني الرفاعي",
-        "base": "https://github.com/Hiwaselah/audio003/releases/download/hani_rifai/",
-    },
-    "52": {
-        "name": "عبدالعزيز الزهراني",
-        "base": "https://github.com/Hiwaselah/audio003/releases/download/abdulaziz_zahrani/",
-    },
-    "53": {
-        "name": "عبدالرحمن العوسي",
-        "base": "https://github.com/Hiwaselah/19_xatm_mutasl_2024/releases/download/abdulrahman_aloosi/",
-    },
-    "54": {
-        "name": "عبدالله بصفر",
-        "base": "https://github.com/Hiwaselah/audio003/releases/download/abdullah_basfar/",
-    },
-    "56": {
-        "name": "وديع اليمني",
-        "base": "https://github.com/Hiwaselah/19_xatm_mutasl_2024/releases/download/wadee3_alyamani/",
-    },
-    "58": {
-        "name": "نعمة الحسن",
-        "base": "https://server6.mp3quran.net/aloosi/",
-    },
-    "59": {
-        "name": "صلاح البدير",
-        "base": "http://download.quranicaudio.com/quran/salahbudair/",
-    },
-    "60": {
-        "name": "أحمد الحواشي",
-        "base": "https://server11.mp3quran.net/hawashi/",
-    },
-    "61": {
-        "name": "ماجد الزامل",
-        "base": "https://server9.mp3quran.net/zaml/",
-    },
-    "9": {
-        "name": "مشاري بن راشد العفاسي",
-        "base": "https://github.com/Hiwaselah/audio003/releases/download/mishari_alafasy/",
-    },
-    "63": {
-        "name": "عبد الرشيد صوفي",
-        "base": "https://github.com/Hiwaselah/audio003/releases/download/abdurrashid_sufi/",
-    },
-    "13": {
-        "name": "خالد القحطاني",
-        "base": "https://github.com/Hiwaselah/19_xatm_mutasl_2024/releases/download/khalid_alqahtani/",
-    },
-    "67": {
-        "name": "ابراهيم الأخضر",
-        "base": "https://github.com/Hiwaselah/19_xatm_mutasl_2024/releases/download/ibrahim_alakhdar/",
-    },
-    "71": {
-        "name": "محمد عثمان خان",
-        "base": "https://download.tvquran.com/download/recitations/319/235/",
-    },
-    "80": {
-        "name": "وليد إبراهيم",
-        "base": "https://server9.mp3quran.net/waleed/",
-    },
-}
+# =========================
+# LOAD RECITERS FROM JSON
+# =========================
 
+def load_reciters():
+    """Load enabled reciters from reciters.json."""
+
+    if not os.path.isfile(RECITERS_JSON_PATH):
+        raise FileNotFoundError(
+            "فایلی reciters.json لە فۆڵدەری بۆتەکە نەدۆزرایەوە: "
+            + RECITERS_JSON_PATH
+        )
+
+    try:
+        with open(RECITERS_JSON_PATH, "r", encoding="utf-8") as f:
+            data = json.load(f)
+    except json.JSONDecodeError as exc:
+        raise ValueError(
+            "فایلی reciters.json بە شێوەیەکی دروست JSON نییە: "
+            + str(exc)
+        )
+
+    if not isinstance(data, list):
+        raise ValueError(
+            "ناوەڕۆکی reciters.json دەبێت لیستێک بێت."
+        )
+
+    reciters = {}
+
+    for item in data:
+        if not isinstance(item, dict):
+            continue
+
+        # Only use reciters with doxx == "true".
+        enabled = str(item.get("doxx", "")).strip().lower()
+
+        if enabled != "true":
+            continue
+
+        reciter_id = str(item.get("id", "")).strip()
+        name = str(item.get("name_ar", "")).strip()
+        url = str(item.get("url", "")).strip()
+
+        if not reciter_id or not name or not url:
+            print(
+                "Skipping incomplete reciter entry:",
+                item,
+                file=sys.stderr,
+            )
+            continue
+
+        if not url.startswith(("http://", "https://")):
+            print(
+                "Skipping reciter with invalid URL:",
+                reciter_id,
+                file=sys.stderr,
+            )
+            continue
+
+        # The bot expects each surah audio URL to be:
+        # base URL + 3-digit surah number + .mp3
+        reciters[reciter_id] = {
+            "name": name,
+            "base": url.rstrip("/") + "/",
+        }
+
+    if not reciters:
+        raise ValueError(
+            "هیچ قارییەکی دروست بە doxx=true لە reciters.json نەدۆزرایەوە."
+        )
+
+    print("Loaded %d reciters from reciters.json." % len(reciters))
+    return reciters
+
+
+RECITERS = load_reciters()
+
+
+# =========================
+# TELEGRAM API
+# =========================
 
 def telegram(method, data=None, files=None, timeout=120):
     data = data or {}
@@ -305,7 +132,10 @@ def telegram(method, data=None, files=None, timeout=120):
         for key, value in data.items():
             body.extend(("--" + boundary + "\r\n").encode())
             body.extend(
-                ('Content-Disposition: form-data; name="%s"\r\n\r\n' % key).encode()
+                (
+                    'Content-Disposition: form-data; name="%s"\r\n\r\n'
+                    % key
+                ).encode()
             )
             body.extend(str(value).encode("utf-8"))
             body.extend(b"\r\n")
@@ -313,10 +143,14 @@ def telegram(method, data=None, files=None, timeout=120):
         for key, (filename, content, mime) in files.items():
             body.extend(("--" + boundary + "\r\n").encode())
             body.extend(
-                ('Content-Disposition: form-data; name="%s"; filename="%s"\r\n'
-                 % (key, filename)).encode()
+                (
+                    'Content-Disposition: form-data; name="%s"; filename="%s"\r\n'
+                    % (key, filename)
+                ).encode()
             )
-            body.extend(("Content-Type: %s\r\n\r\n" % mime).encode())
+            body.extend(
+                ("Content-Type: %s\r\n\r\n" % mime).encode()
+            )
             body.extend(content)
             body.extend(b"\r\n")
 
@@ -406,6 +240,10 @@ def send_video(chat_id, path, caption):
         )
 
 
+# =========================
+# QURAN SURAH LIST
+# =========================
+
 def get_surahs():
     global _SURAH_CACHE
 
@@ -424,7 +262,7 @@ def keyboard_reciters():
     rows = []
     items = list(RECITERS.items())
 
-    # Two buttons per row to keep the list compact.
+    # Two buttons per row.
     for i in range(0, len(items), 2):
         row = []
 
@@ -484,6 +322,10 @@ def keyboard_surahs(page=0):
     return {"inline_keyboard": rows}
 
 
+# =========================
+# DOWNLOAD FILES
+# =========================
+
 def download_file(url, output_path, min_size=100):
     request = urllib.request.Request(
         url,
@@ -527,6 +369,10 @@ def download_surah_audio(surah_number, reciter_id, output_path):
         )
 
 
+# =========================
+# AYAH TIMING DATABASE
+# =========================
+
 def download_timings_database(reciter_id):
     os.makedirs(TIMINGS_DIR, exist_ok=True)
 
@@ -535,7 +381,7 @@ def download_timings_database(reciter_id):
         str(reciter_id) + ".db",
     )
 
-    # Reuse a downloaded database unless it is missing or invalid.
+    # Reuse a valid downloaded database.
     if os.path.exists(db_path):
         try:
             conn = sqlite3.connect(db_path)
@@ -600,8 +446,7 @@ def get_ayah_timings(reciter_id, surah_number):
     for sura, ayah, start_time in rows:
         result[int(ayah)] = float(start_time)
 
-    # Detect whether values are milliseconds or seconds.
-    # Quran surah timestamps in milliseconds are usually large values.
+    # Some databases store timestamps in milliseconds.
     largest = max(result.values())
 
     if largest >= 10000:
@@ -640,6 +485,10 @@ def get_audio_duration(audio_path):
 
     return duration
 
+
+# =========================
+# READ AYAH TEXT FROM QURAN DB
+# =========================
 
 def find_surah_rows(surah_number, start_ayah, end_ayah):
     if end_ayah < start_ayah:
@@ -774,6 +623,10 @@ def find_surah_rows(surah_number, start_ayah, end_ayah):
         conn.close()
 
 
+# =========================
+# VIDEO CREATION
+# =========================
+
 def run_ffmpeg(args):
     proc = subprocess.run(
         args,
@@ -796,11 +649,11 @@ def build_video(chat_id, ayahs, reciter_id):
     try:
         surah_number = int(ayahs[0]["surah_number"])
 
-        # Download the whole surah once: 003.mp3, 001.mp3, etc.
         full_audio_path = os.path.join(
             job_dir,
             "%03d.mp3" % surah_number,
         )
+
         download_surah_audio(
             surah_number,
             reciter_id,
@@ -810,8 +663,6 @@ def build_video(chat_id, ayahs, reciter_id):
         timings = get_ayah_timings(reciter_id, surah_number)
         audio_duration = get_audio_duration(full_audio_path)
 
-        # Build clips using the start time of each ayah and the next
-        # ayah's start time. The last ayah ends at the audio duration.
         clips = []
 
         for i, ayah in enumerate(ayahs, 1):
@@ -830,8 +681,6 @@ def build_video(chat_id, ayahs, reciter_id):
             else:
                 end_time = audio_duration
 
-            # Some databases may not include the next ayah if the
-            # selected ayah is not the final ayah of the surah.
             if end_time <= start_time:
                 raise RuntimeError(
                     "کاتی timing بۆ ئایەتی %d دروست نییە."
@@ -841,7 +690,11 @@ def build_video(chat_id, ayahs, reciter_id):
             end_time = min(end_time, audio_duration)
             duration = end_time - start_time
 
-            if start_time < 0 or start_time >= audio_duration or duration <= 0:
+            if (
+                start_time < 0
+                or start_time >= audio_duration
+                or duration <= 0
+            ):
                 raise RuntimeError(
                     "کاتی ئایەتی %d لە سنووری دەنگەکەدا نییە."
                     % ayah_number
@@ -905,6 +758,10 @@ def build_video(chat_id, ayahs, reciter_id):
         shutil.rmtree(job_dir, ignore_errors=True)
         raise
 
+
+# =========================
+# BOT COMMANDS
+# =========================
 
 def start(chat_id):
     SESSIONS[chat_id] = {"state": "reciter"}
@@ -978,7 +835,10 @@ def handle_message(message):
             )
 
         except Exception as exc:
-            send_message(chat_id, "ژمارەیەکی دروست بنووسە. " + str(exc))
+            send_message(
+                chat_id,
+                "ژمارەیەکی دروست بنووسە. " + str(exc),
+            )
 
         return
 
@@ -1058,8 +918,15 @@ def handle_message(message):
 
         return
 
-    send_message(chat_id, "تکایە بە هەنگاوەکانی بۆتەکە بەردەوام بە.")
+    send_message(
+        chat_id,
+        "تکایە بە هەنگاوەکانی بۆتەکە بەردەوام بە.",
+    )
 
+
+# =========================
+# INLINE BUTTONS
+# =========================
 
 def handle_callback(callback):
     callback_id = callback.get("id")
@@ -1128,7 +995,10 @@ def handle_callback(callback):
 
             if not session or not session.get("reciter_id"):
                 start(chat_id)
-                answer_callback(callback_id, "سەرەتا قاری هەڵبژێرە.")
+                answer_callback(
+                    callback_id,
+                    "سەرەتا قاری هەڵبژێرە.",
+                )
                 return
 
             number = int(data.split(":", 1)[1])
@@ -1165,6 +1035,10 @@ def handle_callback(callback):
     except Exception as exc:
         answer_callback(callback_id, str(exc)[:180])
 
+
+# =========================
+# MAIN LOOP
+# =========================
 
 def main():
     if shutil.which("ffmpeg") is None:
