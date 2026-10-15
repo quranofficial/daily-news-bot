@@ -1,3 +1,4 @@
+
 import os
 import json
 import random
@@ -28,7 +29,7 @@ BASE_DIR = os.path.dirname(os.path.abspath(__file__))
 WORK_DIR = os.path.join(BASE_DIR, "quran_video_work")
 OUTPUT_VIDEO = os.path.join(BASE_DIR, "quran_nightly.mp4")
 
-# Your own Quran font, uploaded beside quran_video.py
+# Quran font: ONLY for Arabic Quran verses
 QURAN_FONT_PATH = os.path.join(BASE_DIR, "quran.ttf")
 
 DB_URL = (
@@ -150,7 +151,7 @@ def find_font():
     )
 
 
-# System font: for Kurdish tafsir and Kurdish labels
+# System font: ALL Kurdish text and labels
 SYSTEM_FONT_PATH = find_font()
 
 
@@ -171,7 +172,7 @@ def make_font(size):
 
 
 def make_quran_font(size):
-    """Your own quran.ttf font for Arabic Quran text."""
+    """Custom quran.ttf font ONLY for Arabic Quran verses."""
     if not os.path.isfile(QURAN_FONT_PATH):
         raise RuntimeError(
             "فایلی quran.ttf نەدۆزرایەوە. "
@@ -276,6 +277,7 @@ def draw_rtl_block(
     if not text:
         return top
 
+    # quran.ttf ONLY when explicitly requested for Quran verses
     font_loader = make_quran_font if use_quran_font else make_font
 
     selected_font = None
@@ -291,7 +293,6 @@ def draw_rtl_block(
         if len(lines) > max_lines:
             continue
 
-        # Reduce the line gap for smaller fonts.
         current_gap = min(line_gap, max(1, size // 8))
 
         total_height, heights = get_text_height(
@@ -668,135 +669,260 @@ def get_random_verses():
 
 
 # =========================
-# CREATE VERSE IMAGE
+# CREATE PREMIUM VERSE IMAGE
 # =========================
 
 def create_ayah_image(ayah, index, image_path):
-    image = Image.new("RGB", (WIDTH, HEIGHT), (12, 35, 42))
+    image = Image.new("RGB", (WIDTH, HEIGHT), (8, 26, 31))
     draw = ImageDraw.Draw(image)
 
-    # Background gradient
+    # Dark emerald gradient
     for y in range(HEIGHT):
         ratio = y / HEIGHT
 
         color = (
-            int(9 + 8 * ratio),
-            int(35 + 20 * ratio),
-            int(43 + 17 * ratio)
+            int(7 + 7 * ratio),
+            int(29 + 19 * ratio),
+            int(34 + 13 * ratio)
         )
 
         draw.line((0, y, WIDTH, y), fill=color)
 
+    gold = (218, 185, 111)
+    soft_gold = (151, 127, 76)
+    white = (250, 247, 235)
+    muted_white = (206, 220, 213)
+    panel = (16, 43, 47)
+
     # Outer frame
     draw.rounded_rectangle(
-        (25, 25, WIDTH - 25, HEIGHT - 25),
-        radius=28,
-        outline=(197, 166, 94),
+        (19, 19, WIDTH - 19, HEIGHT - 19),
+        radius=32,
+        outline=gold,
         width=3
     )
 
     draw.rounded_rectangle(
-        (42, 42, WIDTH - 42, HEIGHT - 42),
-        radius=22,
-        outline=(93, 137, 133),
+        (31, 31, WIDTH - 31, HEIGHT - 31),
+        radius=27,
+        outline=(65, 104, 91),
         width=1
     )
 
-    # Surah name: your own Quran font
+    # Decorative corners
+    corner_size = 42
+    margin = 42
+
+    corners = [
+        (margin, margin, 1, 1),
+        (WIDTH - margin, margin, -1, 1),
+        (margin, HEIGHT - margin, 1, -1),
+        (WIDTH - margin, HEIGHT - margin, -1, -1)
+    ]
+
+    for x, y, dx, dy in corners:
+        draw.line(
+            (x, y, x + dx * corner_size, y),
+            fill=gold,
+            width=2
+        )
+
+        draw.line(
+            (x, y, x, y + dy * corner_size),
+            fill=gold,
+            width=2
+        )
+
+        draw.ellipse(
+            (x - 4, y - 4, x + 4, y + 4),
+            fill=gold
+        )
+
+    # Header separator
+    draw.line(
+        (155, 77, WIDTH - 155, 77),
+        fill=soft_gold,
+        width=1
+    )
+
+    # Decorative diamond
+    cx = WIDTH // 2
+    cy = 77
+
+    draw.polygon(
+        [
+            (cx, cy - 7),
+            (cx + 7, cy),
+            (cx, cy + 7),
+            (cx - 7, cy)
+        ],
+        fill=gold
+    )
+
+    # Surah name: Kurdish/system font, NOT quran.ttf
     draw.text(
-        (WIDTH // 2, 100),
+        (WIDTH // 2, 112),
         shape_rtl(ayah["surah_name"]),
-        font=make_quran_font(29),
-        fill=(236, 213, 155),
+        font=make_font(29),
+        fill=gold,
         anchor="mm",
         direction="rtl",
         language="ar"
     )
 
-    # Actual ayah number: system font for Kurdish
+    # Ayah number: Kurdish/system font
     draw.text(
-        (WIDTH // 2, 145),
+        (WIDTH // 2, 155),
         shape_rtl("ئایەتی " + str(ayah["ayah_number"])),
         font=make_font(23),
-        fill=(224, 233, 229),
+        fill=muted_white,
         anchor="mm",
         direction="rtl",
         language="ar"
     )
 
-    # Arabic ayah frame
+    # Header divider
+    draw.line(
+        (245, 184, WIDTH - 245, 184),
+        fill=(72, 112, 94),
+        width=1
+    )
+
+    draw.ellipse(
+        (WIDTH // 2 - 4, 180, WIDTH // 2 + 4, 188),
+        fill=gold
+    )
+
+    # Quran verse panel
     draw.rounded_rectangle(
-        (45, 180, WIDTH - 45, 600),
-        radius=24,
-        fill=(20, 52, 57),
-        outline=(126, 153, 122),
+        (43, 205, WIDTH - 43, 600),
+        radius=27,
+        fill=(9, 32, 37),
+        outline=gold,
         width=2
     )
 
-    # Quran text uses quran.ttf and auto-fits inside the box
+    draw.rounded_rectangle(
+        (53, 215, WIDTH - 53, 590),
+        radius=22,
+        outline=(53, 91, 79),
+        width=1
+    )
+
+    # Decorative markers
+    for marker_y in (230, 575):
+        draw.ellipse(
+            (
+                WIDTH // 2 - 4,
+                marker_y - 4,
+                WIDTH // 2 + 4,
+                marker_y + 4
+            ),
+            fill=gold
+        )
+
+    # Arabic Quran text: ONLY this block uses quran.ttf
     draw_rtl_block(
         draw,
         ayah["arabic"],
-        195,
+        240,
         WIDTH - 120,
         39,
-        (255, 250, 231),
+        white,
         max_lines=30,
         line_gap=5,
-        max_height=390,
+        max_height=325,
         use_quran_font=True
     )
 
-    # Easy tafsir frame
+    # Tafsir panel
     draw.rounded_rectangle(
-        (45, 615, WIDTH - 45, 1090),
-        radius=24,
-        fill=(17, 45, 51),
-        outline=(126, 153, 122),
+        (43, 620, WIDTH - 43, 1095),
+        radius=27,
+        fill=panel,
+        outline=(109, 139, 104),
         width=2
     )
 
-    # Kurdish heading uses system font
+    draw.rounded_rectangle(
+        (53, 630, WIDTH - 53, 1085),
+        radius=21,
+        outline=(48, 82, 72),
+        width=1
+    )
+
+    # Tafsir heading plaque: Kurdish/system font
+    draw.rounded_rectangle(
+        (175, 640, WIDTH - 175, 687),
+        radius=20,
+        fill=(34, 67, 59),
+        outline=soft_gold,
+        width=1
+    )
+
     draw.text(
-        (WIDTH // 2, 655),
+        (WIDTH // 2, 663),
         shape_rtl("تەفسیری ئاسان"),
         font=make_font(27),
-        fill=(236, 213, 155),
+        fill=gold,
         anchor="mm",
         direction="rtl",
         language="ar"
     )
 
-    # Tafsir uses system font, automatically shrinks to fit
+    # Decorative side markers
+    for x in (157, WIDTH - 157):
+        draw.ellipse(
+            (x - 3, 660, x + 3, 666),
+            fill=gold
+        )
+
+    # Tafsir: Kurdish/system font ONLY
     draw_rtl_block(
         draw,
         ayah["tafsir"],
-        690,
+        700,
         WIDTH - 120,
         28,
-        (245, 247, 241),
+        white,
         max_lines=45,
         line_gap=4,
-        max_height=375,
+        max_height=370,
         use_quran_font=False
     )
 
     # Footer separator
     draw.line(
-        (100, 1115, WIDTH - 100, 1115),
-        fill=(126, 153, 122),
-        width=2
+        (95, 1120, WIDTH - 95, 1120),
+        fill=soft_gold,
+        width=1
     )
 
-    # Required footer
+    draw.polygon(
+        [
+            (WIDTH // 2, 1113),
+            (WIDTH // 2 + 7, 1120),
+            (WIDTH // 2, 1127),
+            (WIDTH // 2 - 7, 1120)
+        ],
+        fill=gold
+    )
+
+    # Brand footer: Kurdish/system font
     draw.text(
         (WIDTH // 2, 1160),
         shape_rtl("قورئانی پیرۆز - ڕێگای ئیسلام"),
         font=make_font(23),
-        fill=(236, 213, 155),
+        fill=gold,
         anchor="mm",
         direction="rtl",
         language="ar"
+    )
+
+    draw.line(
+        (220, 1190, WIDTH - 220, 1190),
+        fill=(65, 101, 85),
+        width=1
     )
 
     image.save(image_path)
@@ -903,7 +1029,10 @@ def create_video():
         OUTPUT_VIDEO
     ])
 
-    if not os.path.exists(OUTPUT_VIDEO) or os.path.getsize(OUTPUT_VIDEO) < 10000:
+    if (
+        not os.path.exists(OUTPUT_VIDEO)
+        or os.path.getsize(OUTPUT_VIDEO) < 10000
+    ):
         raise RuntimeError(
             "ڤیدیۆکە دروست نەبوو یان قەبارەکەی زۆر بچووکە."
         )
@@ -1006,7 +1135,7 @@ def main():
     if not shutil.which("ffmpeg"):
         raise RuntimeError("FFmpeg دامەزراو نییە.")
 
-    # Check your custom Quran font before starting
+    # Check custom Quran font before starting
     if not os.path.isfile(QURAN_FONT_PATH):
         raise RuntimeError(
             "quran.ttf لە هەمان شوێنی quran_video.py نەدۆزرایەوە."
