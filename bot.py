@@ -1,8 +1,10 @@
-
 import os
 import json
 import random
+import sqlite3
 import urllib.request
+import urllib.parse
+import tempfile
 from datetime import datetime
 from zoneinfo import ZoneInfo
 
@@ -12,138 +14,177 @@ from zoneinfo import ZoneInfo
 TOKEN = os.environ["BOT_TOKEN"]
 CHANNEL = os.environ["CHANNEL_ID"]
 
+DATABASE_URL = (
+    "https://raw.githubusercontent.com/"
+    "sahanddler/home_dialog/main/quran.db"
+)
 
-def get_json(url):
-    req = urllib.request.Request(
-        url,
-        headers={"User-Agent": "QuranHadithBot/1.0"}
+
+# =========================
+# DOWNLOAD DATABASE
+# =========================
+def download_database():
+    request = urllib.request.Request(
+        DATABASE_URL,
+        headers={"User-Agent": "RegayIslamBot/1.0"}
     )
 
-    with urllib.request.urlopen(req, timeout=20) as r:
-        return json.loads(r.read().decode("utf-8"))
+    with urllib.request.urlopen(request, timeout=60) as response:
+        database_bytes = response.read()
+
+    if not database_bytes:
+        raise ValueError("Database is empty")
+
+    return database_bytes
 
 
 # =========================
-# RANDOM QURAN AYAH
+# GET RANDOM AYAH + TAFSIR
 # =========================
-def random_ayah():
+def get_random_ayah():
+    database_bytes = download_database()
+
+    with tempfile.NamedTemporaryFile(
+        suffix=".db",
+        delete=False
+    ) as temp_file:
+        temp_file.write(database_bytes)
+        database_path = temp_file.name
+
     try:
-        # API خۆی ئایەتێکی هەڕەمەکی هەڵدەبژێرێت.
-        data = get_json(
-            "https://api.alquran.cloud/v1/ayah/random"
-        )
+        connection = sqlite3.connect(database_path)
+        connection.row_factory = sqlite3.Row
 
-        if data.get("code") != 200:
-            raise ValueError("Quran API error")
+        try:
+            cursor = connection.cursor()
 
-        ayah = data["data"]
+            tables = cursor.execute("""
+                SELECT name
+                FROM sqlite_master
+                WHERE type = 'table'
+                  AND name NOT LIKE 'sqlite_%'
+            """).fetchall()
 
-        return (
-            "📖 ئایەتی ڕۆژ لە قورئانی پیرۆز\n\n"
-            f"﴿ {ayah['text']} ﴾\n\n"
-            f"📚 سوورەت: {ayah['surah']['name']}\n"
-            f"🔢 ژمارەی ئایەت: {ayah['numberInSurah']}\n"
-            f"🌐 سەرچاوە: https://alquran.cloud/"
-        )
+            # Find the table containing the required columns.
+            selected_table = None
+            column_map = {}
 
-    except Exception:
-        return (
-            "📖 ئایەتی قورئان\n\n"
-            "ئێستا نەمانتوانی ئایەتەکە وەربگرین.\n"
-            "سەرچاوە: https://alquran.cloud/"
-        )
+            aliases = {
+                "text": ["text"],
+                "asan": ["asan"],
+                "sura_name_ar": ["sura_name_ar"],
+                "ayah": ["ayah"]
+            }
+
+            for table_row in tables:
+                table_name = table_row["name"]
+
+                columns = cursor.execute(
+                    f'PRAGMA table_info("{table_name}")'
+                ).fetchall()
+
+                actual_columns = {
+                    column["name"].lower(): column["name"]
+                    for column in columns
+                }
+
+                found_columns = {}
+                valid_table = True
+
+                for required_name, possible_names in aliases.items():
+                    matched_column = None
+
+                    for possible_name in possible_names:
+                        if possible_name.lower() in actual_columns:
+                            matched_column = actual_columns[
+                                possible_name.lower()
+                            ]
+                            break
+
+                    if matched_column is None:
+                        valid_table = False
+                        break
+
+                    found_columns[required_name] = matched_column
+
+                if valid_table:
+                    selected_table = table_name
+                    column_map = found_columns
+                    break
+
+            if selected_table is None:
+                raise ValueError(
+                    "Could not find a table with columns: "
+                    "text, asan, sura_name_ar, ayah"
+                )
+
+            # Pick one random verse from the database.
+            query = (
+                f'SELECT '
+                f'"{column_map["text"]}" AS verse_text, '
+                f'"{column_map["asan"]}" AS tafsir, '
+                f'"{column_map["sura_name_ar"]}" AS surah_name, '
+                f'"{column_map["ayah"]}" AS ayah_number '
+                f'FROM "{selected_table}" '
+                f'ORDER BY RANDOM() LIMIT 1'
+            )
+
+            row = cursor.execute(query).fetchone()
+
+            if row is None:
+                raise ValueError("No verses found in database")
+
+            verse_text = str(row["verse_text"] or "").strip()
+            tafsir = str(row["tafsir"] or "").strip()
+            surah_name = str(row["surah_name"] or "").strip()
+            ayah_number = str(row["ayah_number"] or "").strip()
+
+            if not verse_text:
+                raise ValueError("The selected verse has no text")
+
+            if not tafsir:
+                tafsir = "تەفسیری ئەم ئایەتە لە داتابەیسدا بەردەست نییە."
+
+            if not surah_name:
+                surah_name = "نەناسراو"
+
+            if not ayah_number:
+                ayah_number = "نەناسراو"
+
+            return {
+                "text": verse_text,
+                "tafsir": tafsir,
+                "surah": surah_name,
+                "ayah": ayah_number
+            }
+
+        finally:
+            connection.close()
+
+    finally:
+        try:
+            os.remove(database_path)
+        except OSError:
+            pass
 
 
 # =========================
-# RANDOM AUTHENTIC HADITH
-# =========================
-HADITHS = [
-    {
-        "text": "إِنَّمَا الْأَعْمَالُ بِالنِّيَّاتِ",
-        "source": "صحيح البخاري، حديث ١"
-    },
-    {
-        "text": (
-            "مَنْ كَانَ يُؤْمِنُ بِاللَّهِ وَالْيَوْمِ الْآخِرِ "
-            "فَلْيَقُلْ خَيْرًا أَوْ لِيَصْمُتْ"
-        ),
-        "source": "صحيح البخاري، حديث ٦٠١٨؛ صحيح مسلم، حديث ٤٧"
-    },
-    {
-        "text": (
-            "لَا يُؤْمِنُ أَحَدُكُمْ حَتَّى يُحِبَّ لِأَخِيهِ "
-            "مَا يُحِبُّ لِنَفْسِهِ"
-        ),
-        "source": "صحيح البخاري، حديث ١٣؛ صحيح مسلم، حديث ٤٥"
-    },
-    {
-        "text": (
-            "الْمُسْلِمُ مَنْ سَلِمَ الْمُسْلِمُونَ "
-            "مِنْ لِسَانِهِ وَيَدِهِ"
-        ),
-        "source": "صحيح البخاري، حديث ١٠؛ صحيح مسلم، حديث ٤٠"
-    },
-    {
-        "text": (
-            "يَسِّرُوا وَلَا تُعَسِّرُوا، "
-            "وَبَشِّرُوا وَلَا تُنَفِّرُوا"
-        ),
-        "source": "صحيح البخاري، حديث ٦٩؛ صحيح مسلم، حديث ١٧٣٤"
-    },
-    {
-        "text": "الْكَلِمَةُ الطَّيِّبَةُ صَدَقَةٌ",
-        "source": "صحيح البخاري، حديث ٢٩٨٩؛ صحيح مسلم، حديث ١٠٠٩"
-    },
-    {
-        "text": "مَنْ لَا يَرْحَمُ لَا يُرْحَمُ",
-        "source": "صحيح البخاري، حديث ٥٩٩٧؛ صحيح مسلم، حديث ٢٣١٨"
-    },
-    {
-        "text": "الدِّينُ النَّصِيحَةُ",
-        "source": "صحيح مسلم، حديث ٥٥"
-    },
-    {
-        "text": (
-            "مَنْ سَلَكَ طَرِيقًا يَلْتَمِسُ فِيهِ عِلْمًا "
-            "سَهَّلَ اللَّهُ لَهُ بِهِ طَرِيقًا إِلَى الْجَنَّةِ"
-        ),
-        "source": "صحيح مسلم، حديث ٢٦٩٩"
-    },
-    {
-        "text": "لَا تَغْضَبْ",
-        "source": "صحيح البخاري، حديث ٦١١٦"
-    }
-]
-
-
-def random_hadith():
-    hadith = random.choice(HADITHS)
-
-    return (
-        "🕌 فەرموودەی ڕۆژ\n\n"
-        f"«{hadith['text']}»\n\n"
-        f"📚 سەرچاوە: {hadith['source']}\n"
-        "ℹ️ دەتوانیت ژمارە و دەقی فەرموودەکە "
-        "لە کتێبی سەرچاوەکەدا بپشکنیت."
-    )
-
-
-# =========================
-# BUILD REPORT
+# BUILD DAILY MESSAGE
 # =========================
 def make_report():
     now = datetime.now(ZoneInfo("Asia/Baghdad"))
     date = now.strftime("%Y-%m-%d")
 
-    ayah = random_ayah()
-    hadith = random_hadith()
+    ayah = get_random_ayah()
 
     return (
-        "🕌 ڕۆحانیەتی ڕۆژ\n"
+        "📖 هەر ڕۆژە و ئایەتێک\n"
         f"📅 {date}\n\n"
-        f"{ayah}\n\n"
-        "━━━━━━━━━━━━━━\n\n"
-        f"{hadith}\n\n"
+        f"﴿ {ayah['text']} ﴾\n\n"
+        "📖 تەفسیری ئاسان:\n\n"
+        f"{ayah['tafsir']}\n\n"
+        f"📚 سوڕەتی: {ayah['surah']}\n"
+        f"🔢 ژمارەی ئایەت: {ayah['ayah']}\n\n"
         "━━━━━━━━━━━━━━\n"
         "— ڕێگای ئیسلام"
     )
@@ -153,27 +194,40 @@ def make_report():
 # SEND TELEGRAM MESSAGE
 # =========================
 def send_message(message):
-    import urllib.parse
-
     url = f"https://api.telegram.org/bot{TOKEN}/sendMessage"
 
     data = urllib.parse.urlencode({
         "chat_id": CHANNEL,
         "text": message,
         "disable_web_page_preview": "true"
-    }).encode()
+    }).encode("utf-8")
 
-    req = urllib.request.Request(url, data=data)
+    request = urllib.request.Request(
+        url,
+        data=data,
+        headers={
+            "Content-Type": "application/x-www-form-urlencoded"
+        }
+    )
 
-    with urllib.request.urlopen(req, timeout=30) as r:
-        result = json.loads(r.read().decode("utf-8"))
+    with urllib.request.urlopen(request, timeout=30) as response:
+        result = json.loads(response.read().decode("utf-8"))
 
-        if not result.get("ok"):
-            raise RuntimeError(
-                "Telegram rejected the message: "
-                + str(result)
-            )
+    if not result.get("ok"):
+        raise RuntimeError(
+            "Telegram rejected the message: " + str(result)
+        )
 
 
+# =========================
+# MAIN
+# =========================
 if __name__ == "__main__":
-    send_message(make_report())
+    try:
+        message = make_report()
+        send_message(message)
+        print("Daily Quran ayah and tafsir sent successfully.")
+
+    except Exception as error:
+        print(f"ERROR: {error}")
+        raise
