@@ -118,11 +118,15 @@ def keyboard_surahs(page=0):
 
 
 def find_surah_rows(surah_number, start_ayah, end_ayah):
+    """Read selected ayahs using the user's exact SQLite schema."""
     if end_ayah < start_ayah:
         raise ValueError("ژمارەی ئایەتی کۆتایی دەبێت گەورەتر یان یەکسان بێت بە ئایەتی دەستپێک.")
     count = end_ayah - start_ayah + 1
     if count > MAX_AYAHS:
-        raise ValueError("بۆ هەر ڤیدیۆیەک زۆرترین %d ئایەت ڕێگەپێدراوە. تکایە ماوەیەکی کەمتر هەڵبژێرە." % MAX_AYAHS)
+        raise ValueError(
+            "بۆ هەر ڤیدیۆیەک زۆرترین %d ئایەت ڕێگەپێدراوە. تکایە ماوەیەکی کەمتر هەڵبژێرە."
+            % MAX_AYAHS
+        )
 
     surahs = get_surahs()
     surah = next((s for s in surahs if int(s["number"]) == int(surah_number)), None)
@@ -133,45 +137,85 @@ def find_surah_rows(surah_number, start_ayah, end_ayah):
 
     qv.ensure_database()
     db_path = getattr(qv, "DB_PATH", os.path.join(BASE_DIR, "quran.db"))
+    if not os.path.exists(db_path):
+        raise RuntimeError("فایلی quran.db نەدۆزرایەوە: " + str(db_path))
+
     conn = sqlite3.connect(db_path)
     conn.row_factory = sqlite3.Row
     try:
-        table, cols = qv.find_database_table(conn)
-        # cols maps lowercase column names to their actual names.
-        actual = {str(k).lower(): v for k, v in cols.items()}
-        text_col = actual.get("text")
-        tafsir_col = actual.get("asan")
-        name_col = actual.get("sura_name_ar")
-        ayah_col = actual.get("ayah")
-        num_col = next((actual[k] for k in ("sura_id", "surah_id", "sura_number", "surah_number", "soraid", "sura") if k in actual), None)
-        if not all([text_col, tafsir_col, name_col, ayah_col]):
-            raise RuntimeError("ستونە پێویستەکانی quran.db نەدۆزرایەوە.")
+        # Use the exact table/columns supplied by the user, without matching
+        # Arabic surah names (which may contain different harakat/spelling).
+        table_row = conn.execute(
+            "SELECT name FROM sqlite_master WHERE type='table' AND lower(name)=lower(?)",
+            ("ayah_text",)
+        ).fetchone()
+        if not table_row:
+            raise RuntimeError("خشتەی ayah_text لە quran.db نەدۆزرایەوە.")
 
-        if num_col:
-            rows = conn.execute(
-                'SELECT * FROM "%s" WHERE "%s"=? AND CAST("%s" AS INTEGER) BETWEEN ? AND ? ORDER BY CAST("%s" AS INTEGER)' %
-                (table, num_col, ayah_col, ayah_col), (surah_number, start_ayah, end_ayah)).fetchall()
-        else:
-            # Fallback: compare Arabic surah names after normalization.
-            rows = conn.execute('SELECT * FROM "%s" ORDER BY rowid' % table).fetchall()
-            target_name = qv.normalize_arabic_name(surah["name"])
-            rows = [r for r in rows if qv.normalize_arabic_name(str(r[name_col])) == target_name and start_ayah <= int(r[ayah_col]) <= end_ayah]
-            rows.sort(key=lambda r: int(r[ayah_col]))
+        table_name = table_row["name"]
+        column_rows = conn.execute('PRAGMA table_info("%s")' % table_name.replace('"', '""')).fetchall()
+        actual_columns = {str(row["name"]).lower(): str(row["name"]) for row in column_rows}
+
+        required = ("suraid", "sura_name_ar", "text", "asan", "ayah")
+        missing = [name for name in required if name not in actual_columns]
+        if missing:
+            raise RuntimeError("ئەم ستوونانە لە ayah_text نەدۆزرایەوە: " + ", ".join(missing))
+
+        sura_id_col = actual_columns["suraid"]
+        ayah_col = actual_columns["ayah"]
+        text_col = actual_columns["text"]
+        tafsir_col = actual_columns["asan"]
+        name_col = actual_columns["sura_name_ar"]
+
+        sql = (
+            'SELECT "{name}" AS sura_name, "{ayah}" AS ayah_number, '
+            '"{text}" AS arabic_text, "{tafsir}" AS tafsir_text '
+            'FROM "{table}" '
+            'WHERE CAST("{sura_id}" AS INTEGER)=? '
+            'AND CAST("{ayah}" AS INTEGER) BETWEEN ? AND ? '
+            'ORDER BY CAST("{ayah}" AS INTEGER)'
+        ).format(
+            name=name_col.replace('"', '""'),
+            ayah=ayah_col.replace('"', '""'),
+            text=text_col.replace('"', '""'),
+            tafsir=tafsir_col.replace('"', '""'),
+            table=table_name.replace('"', '""'),
+            sura_id=sura_id_col.replace('"', '""'),
+        )
+        rows = conn.execute(sql, (int(surah_number), int(start_ayah), int(end_ayah))).fetchall()
 
         if len(rows) != count:
-            raise RuntimeError("هەموو ئایەتەکان لە quran.db نەدۆزرایەوە. داتابەیسەکە و پێکهاتەی ناوەکانی سوورەت بپشکنە.")
-        # Calculate global ayah numbers for the audio API.
-        global_start = sum(int(s["numberOfAyahs"]) for s in surahs if int(s["number"]) < int(surah_number)) + start_ayah
+            found_numbers = []
+            for row in rows:
+                try:
+                    found_numbers.append(int(row["ayah_number"]))
+                except (TypeError, ValueError):
+                    pass
+            raise RuntimeError(
+                "لە خشتەی ayah_text بۆ سوورەتی ژمارە %d، تەنها %d لە %d ئایەت دۆزرایەوە. "
+                "ئایەتە دۆزراوەکان: %s. تکایە دڵنیابە کە ناوەڕۆکی suraId ژمارەی سوورەتە، نەک ID ـی تایبەت."
+                % (int(surah_number), len(rows), count, found_numbers)
+            )
+
+        global_start = sum(
+            int(s["numberOfAyahs"])
+            for s in surahs
+            if int(s["number"]) < int(surah_number)
+        ) + int(start_ayah)
+
         result = []
         for index, row in enumerate(rows):
-            arabic = str(row[text_col] or "").strip()
-            tafsir = str(row[tafsir_col] or "").strip()
+            arabic = str(row["arabic_text"] or "").strip()
+            tafsir = str(row["tafsir_text"] or "").strip()
             if not arabic:
-                raise RuntimeError("دەقی عەرەبی ئایەتێک بەتاڵە.")
+                raise RuntimeError("دەقی عەرەبی ئایەتی ژمارە %d بەتاڵە." % (start_ayah + index))
+
+            # Keep the Arabic surah name from the database when available.
+            db_surah_name = str(row["sura_name"] or "").strip()
             result.append({
                 "surah_number": int(surah_number),
-                "surah_name": surah["name"],
-                "ayah_number": start_ayah + index,
+                "surah_name": db_surah_name or surah["name"],
+                "ayah_number": int(row["ayah_number"]),
                 "global_number": global_start + index,
                 "arabic": arabic,
                 "tafsir": tafsir or "تەفسیری ئەم ئایەتە لە داتابەیسدا بەردەست نییە.",
