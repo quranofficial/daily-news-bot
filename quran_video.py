@@ -1,4 +1,3 @@
-
 import os
 import json
 import random
@@ -24,14 +23,19 @@ WIDTH = 720
 HEIGHT = 1280
 AYAH_COUNT = 10
 
-WORK_DIR = "quran_video_work"
-OUTPUT_VIDEO = "quran_nightly.mp4"
+BASE_DIR = os.path.dirname(os.path.abspath(__file__))
+
+WORK_DIR = os.path.join(BASE_DIR, "quran_video_work")
+OUTPUT_VIDEO = os.path.join(BASE_DIR, "quran_nightly.mp4")
+
+# Your own Quran font, uploaded beside quran_video.py
+QURAN_FONT_PATH = os.path.join(BASE_DIR, "quran.ttf")
 
 DB_URL = (
     "https://raw.githubusercontent.com/"
     "sahanddler/home_dialog/main/quran.db"
 )
-DB_PATH = "quran.db"
+DB_PATH = os.path.join(BASE_DIR, "quran.db")
 
 QURAN_API = "https://api.alquran.cloud/v1"
 
@@ -45,18 +49,10 @@ HEADERS = {
 # =========================
 
 def get_json(url):
-    request = urllib.request.Request(
-        url,
-        headers=HEADERS
-    )
+    request = urllib.request.Request(url, headers=HEADERS)
 
-    with urllib.request.urlopen(
-        request,
-        timeout=60
-    ) as response:
-        return json.loads(
-            response.read().decode("utf-8")
-        )
+    with urllib.request.urlopen(request, timeout=60) as response:
+        return json.loads(response.read().decode("utf-8"))
 
 
 def run_command(command):
@@ -74,25 +70,15 @@ def run_command(command):
 
 
 def download_file(url, filename):
-    request = urllib.request.Request(
-        url,
-        headers=HEADERS
-    )
+    request = urllib.request.Request(url, headers=HEADERS)
 
-    with urllib.request.urlopen(
-        request,
-        timeout=120
-    ) as response:
+    with urllib.request.urlopen(request, timeout=120) as response:
         with open(filename, "wb") as output:
             shutil.copyfileobj(response, output)
 
-    if (
-        not os.path.isfile(filename)
-        or os.path.getsize(filename) < 1000
-    ):
+    if not os.path.isfile(filename) or os.path.getsize(filename) < 1000:
         raise RuntimeError(
-            "فایل بە تەواوی دابەزێنراو نییە: "
-            + filename
+            "فایل بە تەواوی دابەزێنراو نییە: " + filename
         )
 
 
@@ -101,10 +87,7 @@ def download_file(url, filename):
 # =========================
 
 def ensure_database():
-    if (
-        os.path.isfile(DB_PATH)
-        and os.path.getsize(DB_PATH) > 1000
-    ):
+    if os.path.isfile(DB_PATH) and os.path.getsize(DB_PATH) > 1000:
         with open(DB_PATH, "rb") as file:
             if file.read(16) == b"SQLite format 3\x00":
                 print("Using existing Quran database.")
@@ -158,30 +141,51 @@ def find_font():
 
     for pattern in patterns:
         matches = glob.glob(pattern, recursive=True)
-
         if matches:
             return matches[0]
 
     raise RuntimeError(
-        "فۆنتی عەرەبی نەدۆزرایەوە؛ "
+        "فۆنتی بنەڕەتی بۆ دەقی کوردی نەدۆزرایەوە؛ "
         "fonts-noto-core لە workflow دابمەزرێنە."
     )
 
 
-FONT_PATH = find_font()
+# System font: for Kurdish tafsir and Kurdish labels
+SYSTEM_FONT_PATH = find_font()
 
 
-def make_font(size):
+def load_font(path, size):
     try:
         return ImageFont.truetype(
-            FONT_PATH,
+            path,
             size,
             layout_engine=ImageFont.Layout.RAQM
         )
     except (AttributeError, ValueError):
-        return ImageFont.truetype(
-            FONT_PATH,
-            size
+        return ImageFont.truetype(path, size)
+
+
+def make_font(size):
+    """System font for Kurdish text and general labels."""
+    return load_font(SYSTEM_FONT_PATH, size)
+
+
+def make_quran_font(size):
+    """Your own quran.ttf font for Arabic Quran text."""
+    if not os.path.isfile(QURAN_FONT_PATH):
+        raise RuntimeError(
+            "فایلی quran.ttf نەدۆزرایەوە. "
+            "دڵنیابە لەوەی لە هەمان فۆڵدەری "
+            "quran_video.py ـدایە."
+        )
+
+    try:
+        return load_font(QURAN_FONT_PATH, size)
+    except Exception as error:
+        raise RuntimeError(
+            "نەتوانرا فۆنتی quran.ttf بخوێندرێتەوە. "
+            "دڵنیابە فایلەکە فۆنتێکی دروستی TTF ـە.\n"
+            + str(error)
         )
 
 
@@ -192,6 +196,17 @@ def shape_rtl(text):
 # =========================
 # TEXT WRAPPING
 # =========================
+
+def measure_text_width(font, text):
+    try:
+        return font.getlength(
+            text,
+            direction="rtl",
+            language="ar"
+        )
+    except (TypeError, ValueError):
+        return font.getlength(text)
+
 
 def wrap_rtl_text(text, font, max_width):
     words = str(text).split()
@@ -205,23 +220,13 @@ def wrap_rtl_text(text, font, max_width):
     for word in words[1:]:
         candidate = current + " " + word
 
-        try:
-            width = font.getlength(
-                candidate,
-                direction="rtl",
-                language="ar"
-            )
-        except (TypeError, ValueError):
-            width = font.getlength(candidate)
-
-        if width <= max_width:
+        if measure_text_width(font, candidate) <= max_width:
             current = candidate
         else:
             lines.append(current)
             current = word
 
     lines.append(current)
-
     return lines
 
 
@@ -238,22 +243,14 @@ def get_text_height(draw, lines, font, line_gap):
                 language="ar"
             )
         except (TypeError, ValueError):
-            box = draw.textbbox(
-                (0, 0),
-                line,
-                font=font
-            )
+            box = draw.textbbox((0, 0), line, font=font)
 
-        heights.append(
-            max(1, box[3] - box[1])
-        )
+        heights.append(max(1, box[3] - box[1]))
 
     total_height = sum(heights)
 
     if len(heights) > 1:
-        total_height += (
-            len(heights) - 1
-        ) * line_gap
+        total_height += (len(heights) - 1) * line_gap
 
     return total_height, heights
 
@@ -271,45 +268,46 @@ def draw_rtl_block(
     fill,
     max_lines=40,
     line_gap=5,
-    max_height=None
+    max_height=None,
+    use_quran_font=False
 ):
     text = str(text).strip()
 
     if not text:
         return top
 
+    font_loader = make_quran_font if use_quran_font else make_font
+
     selected_font = None
     selected_lines = None
     selected_heights = None
+    selected_gap = line_gap
 
     for size in range(font_size, 7, -1):
-        font = make_font(size)
+        font = font_loader(size)
 
-        lines = wrap_rtl_text(
-            text,
-            font,
-            max_width
-        )
+        lines = wrap_rtl_text(text, font, max_width)
 
         if len(lines) > max_lines:
             continue
+
+        # Reduce the line gap for smaller fonts.
+        current_gap = min(line_gap, max(1, size // 8))
 
         total_height, heights = get_text_height(
             draw,
             lines,
             font,
-            line_gap
+            current_gap
         )
 
-        if (
-            max_height is not None
-            and total_height > max_height
-        ):
+        if max_height is not None and total_height > max_height:
             continue
 
         selected_font = font
         selected_lines = lines
         selected_heights = heights
+        selected_gap = current_gap
         break
 
     if selected_lines is None:
@@ -320,21 +318,15 @@ def draw_rtl_block(
 
     total_height = (
         sum(selected_heights)
-        + max(0, len(selected_lines) - 1) * line_gap
+        + max(0, len(selected_lines) - 1) * selected_gap
     )
 
     y = top
 
     if max_height is not None:
-        y += max(
-            0,
-            (max_height - total_height) // 2
-        )
+        y += max(0, (max_height - total_height) // 2)
 
-    for line, line_height in zip(
-        selected_lines,
-        selected_heights
-    ):
+    for line, line_height in zip(selected_lines, selected_heights):
         try:
             draw.text(
                 (WIDTH // 2, y),
@@ -354,7 +346,7 @@ def draw_rtl_block(
                 anchor="mt"
             )
 
-        y += line_height + line_gap
+        y += line_height + selected_gap
 
     return y
 
@@ -366,10 +358,7 @@ def draw_rtl_block(
 def normalize_arabic_name(value):
     value = str(value or "").strip()
 
-    value = unicodedata.normalize(
-        "NFD",
-        value
-    )
+    value = unicodedata.normalize("NFD", value)
 
     cleaned = []
 
@@ -431,21 +420,15 @@ def find_database_table(connection):
             + ")"
         ).fetchall()
 
-        columns = [
-            row[1] for row in columns_info
-        ]
+        columns = [row[1] for row in columns_info]
 
         column_lookup = {
             column.lower(): column
             for column in columns
         }
 
-        if required_columns.issubset(
-            set(column_lookup.keys())
-        ):
-            possible_tables.append(
-                (table_name, column_lookup)
-            )
+        if required_columns.issubset(set(column_lookup.keys())):
+            possible_tables.append((table_name, column_lookup))
 
     if not possible_tables:
         raise RuntimeError(
@@ -454,15 +437,13 @@ def find_database_table(connection):
             "لەخۆ بگرێت."
         )
 
-    # Prefer the table containing the most Quran records.
     best_table = None
     best_lookup = None
     best_count = -1
 
     for table_name, column_lookup in possible_tables:
         count = connection.execute(
-            "SELECT COUNT(*) FROM "
-            + quote_identifier(table_name)
+            "SELECT COUNT(*) FROM " + quote_identifier(table_name)
         ).fetchone()[0]
 
         if count > best_count:
@@ -470,12 +451,7 @@ def find_database_table(connection):
             best_lookup = column_lookup
             best_count = count
 
-    print(
-        "Database table:",
-        best_table,
-        "| rows:",
-        best_count
-    )
+    print("Database table:", best_table, "| rows:", best_count)
 
     return best_table, best_lookup
 
@@ -491,51 +467,31 @@ def get_random_verses():
     connection.row_factory = sqlite3.Row
 
     try:
-        table_name, column_lookup = find_database_table(
-            connection
-        )
+        table_name, column_lookup = find_database_table(connection)
 
-        query = (
-            "SELECT * FROM "
-            + quote_identifier(table_name)
-        )
+        query = "SELECT * FROM " + quote_identifier(table_name)
 
         try:
-            rows = connection.execute(
-                query + " ORDER BY rowid"
-            ).fetchall()
+            rows = connection.execute(query + " ORDER BY rowid").fetchall()
         except sqlite3.OperationalError:
-            rows = connection.execute(
-                query
-            ).fetchall()
+            rows = connection.execute(query).fetchall()
 
         if not rows:
             raise RuntimeError(
                 "Database ـەکە هیچ ئایەتێکی تێدا نییە."
             )
 
-        # Required fields
         text_column = column_lookup["text"]
         tafsir_column = column_lookup["asan"]
         name_column = column_lookup["sura_name_ar"]
         ayah_column = column_lookup["ayah"]
 
-        # Optional surah-number fields
         surah_number_aliases = [
-            "sura",
-            "sora",
-            "surah",
-            "sura_id",
-            "sora_id",
-            "surah_id",
-            "sura_no",
-            "sora_no",
-            "surah_no",
-            "sura_number",
-            "sora_number",
-            "surah_number",
-            "sura_num",
-            "sora_num"
+            "sura", "sora", "surah",
+            "sura_id", "sora_id", "surah_id",
+            "sura_no", "sora_no", "surah_no",
+            "sura_number", "sora_number", "surah_number",
+            "sura_num", "sora_num"
         ]
 
         surah_number_column = None
@@ -545,11 +501,7 @@ def get_random_verses():
                 surah_number_column = column_lookup[alias]
                 break
 
-        # Quran API is used only for surah metadata
-        # and recitation audio numbering.
-        surah_response = get_json(
-            QURAN_API + "/surah"
-        )
+        surah_response = get_json(QURAN_API + "/surah")
 
         if surah_response.get("code") != 200:
             raise RuntimeError(
@@ -561,16 +513,9 @@ def get_random_verses():
         api_name_to_number = {}
 
         for surah in api_surahs:
-            normalized_name = normalize_arabic_name(
-                surah["name"]
-            )
+            normalized_name = normalize_arabic_name(surah["name"])
+            api_name_to_number[normalized_name] = int(surah["number"])
 
-            api_name_to_number[
-                normalized_name
-            ] = int(surah["number"])
-
-        # Work out whether the database's surah numbers
-        # start at 0 or at 1.
         numeric_surah_values = []
 
         if surah_number_column:
@@ -588,14 +533,10 @@ def get_random_verses():
             and max(numeric_surah_values) <= 113
         )
 
-        # If the number column is absent or unrecognized,
-        # use the Arabic surah name as a fallback.
         name_order = []
 
         for row in rows:
-            name = str(
-                row[name_column] or ""
-            ).strip()
+            name = str(row[name_column] or "").strip()
 
             if name and name not in name_order:
                 name_order.append(name)
@@ -606,40 +547,30 @@ def get_random_verses():
             if index <= 114:
                 ordered_name_to_number[name] = index
 
-        # Total ayah counts for global audio numbering.
         api_surah_counts = {
             int(surah["number"]): int(surah["numberOfAyahs"])
             for surah in api_surahs
         }
 
         global_start = {}
-
         running_total = 0
 
         for surah_number in range(1, 115):
             global_start[surah_number] = running_total
-            running_total += api_surah_counts.get(
-                surah_number,
-                0
-            )
+            running_total += api_surah_counts.get(surah_number, 0)
 
-        # Group rows by surah number.
         grouped = {}
 
         for row in rows:
             try:
-                ayah_number = int(
-                    row[ayah_column]
-                )
+                ayah_number = int(row[ayah_column])
             except (TypeError, ValueError):
                 continue
 
             if ayah_number < 1:
                 continue
 
-            surah_name = str(
-                row[name_column] or ""
-            ).strip()
+            surah_name = str(row[name_column] or "").strip()
 
             if not surah_name:
                 continue
@@ -648,9 +579,7 @@ def get_random_verses():
 
             if surah_number_column:
                 try:
-                    raw_number = int(
-                        row[surah_number_column]
-                    )
+                    raw_number = int(row[surah_number_column])
 
                     if zero_based_surah_numbers:
                         raw_number += 1
@@ -662,29 +591,17 @@ def get_random_verses():
                     pass
 
             if surah_number is None:
-                normalized_name = normalize_arabic_name(
-                    surah_name
-                )
-
-                surah_number = api_name_to_number.get(
-                    normalized_name
-                )
+                normalized_name = normalize_arabic_name(surah_name)
+                surah_number = api_name_to_number.get(normalized_name)
 
             if surah_number is None:
-                surah_number = ordered_name_to_number.get(
-                    surah_name
-                )
+                surah_number = ordered_name_to_number.get(surah_name)
 
             if not surah_number:
                 continue
 
-            arabic_text = str(
-                row[text_column] or ""
-            ).strip()
-
-            tafsir_text = str(
-                row[tafsir_column] or ""
-            ).strip()
+            arabic_text = str(row[text_column] or "").strip()
+            tafsir_text = str(row[tafsir_column] or "").strip()
 
             if not arabic_text or not tafsir_text:
                 continue
@@ -693,35 +610,20 @@ def get_random_verses():
                 "surah_number": surah_number,
                 "surah_name": surah_name,
                 "ayah_number": ayah_number,
-                "global_number": (
-                    global_start[surah_number]
-                    + ayah_number
-                ),
+                "global_number": global_start[surah_number] + ayah_number,
                 "arabic": arabic_text,
                 "tafsir": tafsir_text
             }
 
-            grouped.setdefault(
-                surah_number,
-                []
-            ).append(item)
+            grouped.setdefault(surah_number, []).append(item)
 
-        # Find all valid windows of 10 consecutive ayahs
-        # with tafsir available for every ayah.
         candidates = []
 
         for surah_number, ayahs in grouped.items():
-            ayahs.sort(
-                key=lambda item: item["ayah_number"]
-            )
+            ayahs.sort(key=lambda item: item["ayah_number"])
 
-            for start in range(
-                0,
-                len(ayahs) - AYAH_COUNT + 1
-            ):
-                window = ayahs[
-                    start:start + AYAH_COUNT
-                ]
+            for start in range(0, len(ayahs) - AYAH_COUNT + 1):
+                window = ayahs[start:start + AYAH_COUNT]
 
                 expected_numbers = list(
                     range(
@@ -731,17 +633,13 @@ def get_random_verses():
                 )
 
                 actual_numbers = [
-                    item["ayah_number"]
-                    for item in window
+                    item["ayah_number"] for item in window
                 ]
 
                 if actual_numbers != expected_numbers:
                     continue
 
-                if not all(
-                    item["arabic"] and item["tafsir"]
-                    for item in window
-                ):
+                if not all(item["arabic"] and item["tafsir"] for item in window):
                     continue
 
                 candidates.append(window)
@@ -774,12 +672,7 @@ def get_random_verses():
 # =========================
 
 def create_ayah_image(ayah, index, image_path):
-    image = Image.new(
-        "RGB",
-        (WIDTH, HEIGHT),
-        (12, 35, 42)
-    )
-
+    image = Image.new("RGB", (WIDTH, HEIGHT), (12, 35, 42))
     draw = ImageDraw.Draw(image)
 
     # Background gradient
@@ -792,10 +685,7 @@ def create_ayah_image(ayah, index, image_path):
             int(43 + 17 * ratio)
         )
 
-        draw.line(
-            (0, y, WIDTH, y),
-            fill=color
-        )
+        draw.line((0, y, WIDTH, y), fill=color)
 
     # Outer frame
     draw.rounded_rectangle(
@@ -812,23 +702,21 @@ def create_ayah_image(ayah, index, image_path):
         width=1
     )
 
-    # Surah name from the database
+    # Surah name: your own Quran font
     draw.text(
         (WIDTH // 2, 100),
         shape_rtl(ayah["surah_name"]),
-        font=make_font(29),
+        font=make_quran_font(29),
         fill=(236, 213, 155),
         anchor="mm",
         direction="rtl",
         language="ar"
     )
 
-    # Actual ayah number
+    # Actual ayah number: system font for Kurdish
     draw.text(
         (WIDTH // 2, 145),
-        shape_rtl(
-            "ئایەتی " + str(ayah["ayah_number"])
-        ),
+        shape_rtl("ئایەتی " + str(ayah["ayah_number"])),
         font=make_font(23),
         fill=(224, 233, 229),
         anchor="mm",
@@ -845,6 +733,7 @@ def create_ayah_image(ayah, index, image_path):
         width=2
     )
 
+    # Quran text uses quran.ttf and auto-fits inside the box
     draw_rtl_block(
         draw,
         ayah["arabic"],
@@ -854,7 +743,8 @@ def create_ayah_image(ayah, index, image_path):
         (255, 250, 231),
         max_lines=30,
         line_gap=5,
-        max_height=390
+        max_height=390,
+        use_quran_font=True
     )
 
     # Easy tafsir frame
@@ -866,6 +756,7 @@ def create_ayah_image(ayah, index, image_path):
         width=2
     )
 
+    # Kurdish heading uses system font
     draw.text(
         (WIDTH // 2, 655),
         shape_rtl("تەفسیری ئاسان"),
@@ -876,6 +767,7 @@ def create_ayah_image(ayah, index, image_path):
         language="ar"
     )
 
+    # Tafsir uses system font, automatically shrinks to fit
     draw_rtl_block(
         draw,
         ayah["tafsir"],
@@ -885,7 +777,8 @@ def create_ayah_image(ayah, index, image_path):
         (245, 247, 241),
         max_lines=45,
         line_gap=4,
-        max_height=375
+        max_height=375,
+        use_quran_font=False
     )
 
     # Footer separator
@@ -895,23 +788,16 @@ def create_ayah_image(ayah, index, image_path):
         width=2
     )
 
-    # Required footer text
+    # Required footer
     draw.text(
         (WIDTH // 2, 1160),
-        shape_rtl(
-            "قورئانی پیرۆز - ڕێگای ئیسلام"
-        ),
+        shape_rtl("قورئانی پیرۆز - ڕێگای ئیسلام"),
         font=make_font(23),
         fill=(236, 213, 155),
         anchor="mm",
         direction="rtl",
         language="ar"
     )
-
-    # No separate Bismillah heading.
-    # No 1 / 10 counter.
-    # No "واتای کوردی".
-    # No QuranEnc.com credit.
 
     image.save(image_path)
 
@@ -937,19 +823,14 @@ def download_ayah_audio(ayah, audio_path):
             + " وەربگیرێت."
         )
 
-    audio_url = response.get(
-        "data", {}
-    ).get("audio")
+    audio_url = response.get("data", {}).get("audio")
 
     if not audio_url:
         raise RuntimeError(
             "بەستەری دەنگی ئایەت نەدۆزرایەوە."
         )
 
-    download_file(
-        audio_url,
-        audio_path
-    )
+    download_file(audio_url, audio_path)
 
 
 # =========================
@@ -957,50 +838,28 @@ def download_ayah_audio(ayah, audio_path):
 # =========================
 
 def create_video():
-    os.makedirs(
-        WORK_DIR,
-        exist_ok=True
-    )
+    os.makedirs(WORK_DIR, exist_ok=True)
 
     selected_ayahs = get_random_verses()
     clip_files = []
 
-    for index, ayah in enumerate(
-        selected_ayahs,
-        start=1
-    ):
-        print(
-            "Preparing ayah",
-            index,
-            "of",
-            AYAH_COUNT
-        )
+    for index, ayah in enumerate(selected_ayahs, start=1):
+        print("Preparing ayah", index, "of", AYAH_COUNT)
 
         image_path = os.path.join(
-            WORK_DIR,
-            "ayah_" + str(index) + ".png"
+            WORK_DIR, "ayah_" + str(index) + ".png"
         )
 
         audio_path = os.path.join(
-            WORK_DIR,
-            "ayah_" + str(index) + ".mp3"
+            WORK_DIR, "ayah_" + str(index) + ".mp3"
         )
 
         clip_path = os.path.join(
-            WORK_DIR,
-            "clip_" + str(index) + ".mp4"
+            WORK_DIR, "clip_" + str(index) + ".mp4"
         )
 
-        create_ayah_image(
-            ayah,
-            index,
-            image_path
-        )
-
-        download_ayah_audio(
-            ayah,
-            audio_path
-        )
+        create_ayah_image(ayah, index, image_path)
+        download_ayah_audio(ayah, audio_path)
 
         run_command([
             "ffmpeg", "-y",
@@ -1022,24 +881,12 @@ def create_video():
 
         clip_files.append(clip_path)
 
-    concat_path = os.path.join(
-        WORK_DIR,
-        "clips.txt"
-    )
+    concat_path = os.path.join(WORK_DIR, "clips.txt")
 
-    with open(
-        concat_path,
-        "w",
-        encoding="utf-8"
-    ) as file:
+    with open(concat_path, "w", encoding="utf-8") as file:
         for clip_path in clip_files:
-            safe_path = os.path.abspath(
-                clip_path
-            ).replace("\\", "/")
-
-            file.write(
-                "file '" + safe_path + "'\n"
-            )
+            safe_path = os.path.abspath(clip_path).replace("\\", "/")
+            file.write("file '" + safe_path + "'\n")
 
     run_command([
         "ffmpeg", "-y",
@@ -1056,19 +903,13 @@ def create_video():
         OUTPUT_VIDEO
     ])
 
-    if (
-        not os.path.exists(OUTPUT_VIDEO)
-        or os.path.getsize(OUTPUT_VIDEO) < 10000
-    ):
+    if not os.path.exists(OUTPUT_VIDEO) or os.path.getsize(OUTPUT_VIDEO) < 10000:
         raise RuntimeError(
             "ڤیدیۆکە دروست نەبوو یان قەبارەکەی زۆر بچووکە."
         )
 
     with open(
-        os.path.join(
-            WORK_DIR,
-            "selected_ayahs.json"
-        ),
+        os.path.join(WORK_DIR, "selected_ayahs.json"),
         "w",
         encoding="utf-8"
     ) as file:
@@ -1111,48 +952,28 @@ def send_video(ayahs):
             + b"\r\n"
         )
 
-    body = field_part(
-        "chat_id",
-        CHANNEL
-    )
+    body = field_part("chat_id", CHANNEL)
+    body += field_part("caption", caption)
+    body += field_part("supports_streaming", "true")
 
-    body += field_part(
-        "caption",
-        caption
-    )
-
-    body += field_part(
-        "supports_streaming",
-        "true"
-    )
-
-    body += (
-        "--" + boundary + "\r\n"
-    ).encode("utf-8")
-
+    body += ("--" + boundary + "\r\n").encode("utf-8")
     body += (
         b'Content-Disposition: form-data; name="video"; '
         b'filename="quran_nightly.mp4"\r\n'
     )
-
     body += b"Content-Type: video/mp4\r\n\r\n"
 
     with open(OUTPUT_VIDEO, "rb") as file:
         body += file.read()
 
-    body += (
-        "\r\n--" + boundary + "--\r\n"
-    ).encode("utf-8")
+    body += ("\r\n--" + boundary + "--\r\n").encode("utf-8")
 
     request = urllib.request.Request(
-        "https://api.telegram.org/bot"
-        + TOKEN
-        + "/sendVideo",
+        "https://api.telegram.org/bot" + TOKEN + "/sendVideo",
         data=body,
         headers={
             "Content-Type": (
-                "multipart/form-data; boundary="
-                + boundary
+                "multipart/form-data; boundary=" + boundary
             ),
             "User-Agent": "QuranNightlyVideo/4.0"
         },
@@ -1160,29 +981,18 @@ def send_video(ayahs):
     )
 
     try:
-        with urllib.request.urlopen(
-            request,
-            timeout=240
-        ) as response:
-            result = json.loads(
-                response.read().decode("utf-8")
-            )
+        with urllib.request.urlopen(request, timeout=240) as response:
+            result = json.loads(response.read().decode("utf-8"))
 
     except urllib.error.HTTPError as error:
-        details = error.read().decode(
-            "utf-8",
-            errors="replace"
-        )
-
+        details = error.read().decode("utf-8", errors="replace")
         raise RuntimeError(
-            "Telegram video upload failed: "
-            + details
+            "Telegram video upload failed: " + details
         )
 
     if not result.get("ok"):
         raise RuntimeError(
-            "Telegram نەیتوانی ڤیدیۆکە بنێرێت: "
-            + str(result)
+            "Telegram نەیتوانی ڤیدیۆکە بنێرێت: " + str(result)
         )
 
     print("Quran video sent successfully.")
@@ -1194,8 +1004,12 @@ def send_video(ayahs):
 
 def main():
     if not shutil.which("ffmpeg"):
+        raise RuntimeError("FFmpeg دامەزراو نییە.")
+
+    # Check your custom Quran font before starting
+    if not os.path.isfile(QURAN_FONT_PATH):
         raise RuntimeError(
-            "FFmpeg دامەزراو نییە."
+            "quran.ttf لە هەمان شوێنی quran_video.py نەدۆزرایەوە."
         )
 
     print("Starting Quran tafsir video...")
