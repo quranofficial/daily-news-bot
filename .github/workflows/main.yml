@@ -9,6 +9,7 @@ on:
 jobs:
   send-report:
     runs-on: ubuntu-latest
+
     steps:
       - name: Get repository
         uses: actions/checkout@v4
@@ -18,8 +19,22 @@ jobs:
         with:
           python-version: "3.12"
 
-      - name: Run bot
+      - name: Install FFmpeg and fonts
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y ffmpeg fonts-noto-core
+
+      - name: Install Python packages
+        run: pip install -r requirements.txt
+
+      - name: Run daily news report
         env:
           BOT_TOKEN: ${{ secrets.BOT_TOKEN }}
           CHANNEL_ID: ${{ secrets.CHANNEL_ID }}
         run: python bot.py
+
+      - name: Create and send Quran video
+        env:
+          BOT_TOKEN: ${{ secrets.BOT_TOKEN }}
+          CHANNEL_ID: ${{ secrets.CHANNEL_ID }}
+        run: python quran_video.py
