@@ -1,5 +1,6 @@
+
 # -*- coding: utf-8 -*-
-"""Telegram Quran video bot with reciter selection and timing databases."""
+"""Telegram Quran video bot with per-user reciter selection."""
 
 import os
 import sys
@@ -8,17 +9,12 @@ import time
 import shutil
 import sqlite3
 import subprocess
-import traceback
 import urllib.request
 import urllib.parse
 import urllib.error
 
+os.environ.setdefault("CHANNEL_ID", "")
 import quran_video as qv
-
-
-# =========================
-# CONFIGURATION
-# =========================
 
 BOT_TOKEN = os.environ["BOT_TOKEN"]
 TG = "https://api.telegram.org/bot" + BOT_TOKEN + "/"
@@ -26,187 +22,45 @@ QURAN_API = "https://api.alquran.cloud/v1"
 
 MAX_AYAHS = max(1, int(os.environ.get("MAX_AYAHS_PER_VIDEO", "20")))
 POLL_TIMEOUT = 30
-
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
 JOBS_DIR = os.path.join(BASE_DIR, "quran_user_jobs")
-TIMINGS_DIR = os.path.join(BASE_DIR, "reciter_timings")
-RECITERS_JSON_PATH = os.path.join(BASE_DIR, "reciters.json")
-LOG_PATH = os.path.join(BASE_DIR, "bot_debug.log")
-
-TIMINGS_BASE_URL = (
-    "https://raw.githubusercontent.com/"
-    "quranofficial/daily-news-bot/main/"
-)
 
 SESSIONS = {}
 _SURAH_CACHE = None
 
+# Reciter choices. Audio filenames use the EveryAyah format:
+# SSSAAA.mp3, for example 001001.mp3.
+RECITERS = {
+    "1": {
+        "name": "هەندرێن عبدالرحمان کوردی",
+        "base": "https://github.com/H4zh4n/TafseeriNoor/raw/files/mp3/Handren_Abdulrahman/",
+    },
+    "2": {
+        "name": "سعد الغامدي",
+        "base": "https://mirrors.quranicaudio.com/everyayah/Ghamadi_40kbps/",
+    },
+    "3": {
+        "name": "عبد الباسط عبد الصمد",
+        "base": "https://mirrors.quranicaudio.com/everyayah/Abdul_Basit_Murattal_192kbps/",
+    },
+    "4": {
+        "name": "أبو بكر الشاطري",
+        "base": "https://mirrors.quranicaudio.com/everyayah/Abu_Bakr_Ash-Shaatree_128kbps/",
+    },
+    "5": {
+        "name": "ماهر المعيقلي",
+        "base": "https://mirrors.quranicaudio.com/everyayah/Maher_AlMuaiqly_64kbps/",
+    },
+    "6": {
+        "name": "ياسر الدوسري",
+        "base": "https://mirrors.quranicaudio.com/everyayah/Yasser_Ad-Dussary_128kbps/",
+    },
+    "7": {
+        "name": "هاني الرفاعي",
+        "base": "https://mirrors.quranicaudio.com/everyayah/Hani_Rifai_192kbps/",
+    },
+}
 
-# =========================
-# LOGGING
-# =========================
-
-def log_error(message):
-    """Print log messages and save them to bot_debug.log."""
-
-    line = (
-        time.strftime("%Y-%m-%d %H:%M:%S")
-        + " | "
-        + str(message)
-    )
-
-    print(line, file=sys.stderr, flush=True)
-
-    try:
-        with open(LOG_PATH, "a", encoding="utf-8") as f:
-            f.write(line + "\n")
-            f.flush()
-    except Exception as exc:
-        print(
-            "Could not write log file: " + repr(exc),
-            file=sys.stderr,
-            flush=True,
-        )
-
-
-def log_exception(context, exc):
-    log_error(
-        context + " | " + repr(exc) + "\n"
-        + traceback.format_exc()
-    )
-
-
-# =========================
-# URL HELPERS
-# =========================
-
-def normalize_github_url(url):
-    """
-    Convert GitHub blob/raw file URLs to raw.githubusercontent.com.
-
-    GitHub Releases URLs are intentionally left unchanged.
-    """
-
-    url = str(url).strip()
-
-    try:
-        parsed = urllib.parse.urlparse(url)
-        host = (parsed.hostname or "").lower()
-        parts = parsed.path.strip("/").split("/")
-
-        if host == "github.com" and len(parts) >= 5:
-            owner, repo = parts[0], parts[1]
-
-            if parts[2] in ("raw", "blob"):
-                branch = parts[3]
-                file_path = "/".join(parts[4:])
-
-                return (
-                    "https://raw.githubusercontent.com/"
-                    + owner + "/"
-                    + repo + "/"
-                    + branch + "/"
-                    + file_path
-                )
-
-        return url
-
-    except Exception as exc:
-        log_error(
-            "URL normalization failed | "
-            + repr(exc)
-            + " | URL="
-            + url
-        )
-        return url
-
-
-# =========================
-# LOAD RECITERS FROM JSON
-# =========================
-
-def load_reciters():
-    """Load enabled reciters from reciters.json."""
-
-    if not os.path.isfile(RECITERS_JSON_PATH):
-        raise FileNotFoundError(
-            "فایلی reciters.json لە فۆڵدەری بۆتەکە نەدۆزرایەوە: "
-            + RECITERS_JSON_PATH
-        )
-
-    try:
-        with open(
-            RECITERS_JSON_PATH, "r", encoding="utf-8"
-        ) as f:
-            data = json.load(f)
-
-    except json.JSONDecodeError as exc:
-        raise ValueError(
-            "فایلی reciters.json بە شێوەیەکی دروست JSON نییە: "
-            + str(exc)
-        )
-
-    if not isinstance(data, list):
-        raise ValueError(
-            "ناوەڕۆکی reciters.json دەبێت لیستێک بێت."
-        )
-
-    reciters = {}
-
-    for item in data:
-        if not isinstance(item, dict):
-            continue
-
-        enabled = str(item.get("doxx", "")).strip().lower()
-
-        if enabled != "true":
-            continue
-
-        reciter_id = str(item.get("id", "")).strip()
-        name = str(item.get("name_ar", "")).strip()
-        url = str(item.get("url", "")).strip()
-
-        if not reciter_id or not name or not url:
-            log_error(
-                "Skipping incomplete reciter entry: "
-                + repr(item)
-            )
-            continue
-
-        if not url.startswith(("http://", "https://")):
-            log_error(
-                "Skipping reciter with invalid URL: "
-                + reciter_id
-            )
-            continue
-
-        url = normalize_github_url(url)
-
-        reciters[reciter_id] = {
-            "name": name,
-            "base": url.rstrip("/") + "/",
-        }
-
-    if not reciters:
-        raise ValueError(
-            "هیچ قارییەکی دروست بە doxx=true "
-            "لە reciters.json نەدۆزرایەوە."
-        )
-
-    log_error(
-        "Loaded %d reciters from reciters.json."
-        % len(reciters)
-    )
-
-    return reciters
-
-
-RECITERS = load_reciters()
-
-
-# =========================
-# TELEGRAM API
-# =========================
 
 def telegram(method, data=None, files=None, timeout=120):
     data = data or {}
@@ -219,10 +73,7 @@ def telegram(method, data=None, files=None, timeout=120):
         for key, value in data.items():
             body.extend(("--" + boundary + "\r\n").encode())
             body.extend(
-                (
-                    'Content-Disposition: form-data; name="%s"\r\n\r\n'
-                    % key
-                ).encode()
+                ('Content-Disposition: form-data; name="%s"\r\n\r\n' % key).encode()
             )
             body.extend(str(value).encode("utf-8"))
             body.extend(b"\r\n")
@@ -230,14 +81,10 @@ def telegram(method, data=None, files=None, timeout=120):
         for key, (filename, content, mime) in files.items():
             body.extend(("--" + boundary + "\r\n").encode())
             body.extend(
-                (
-                    'Content-Disposition: form-data; name="%s"; filename="%s"\r\n'
-                    % (key, filename)
-                ).encode()
+                ('Content-Disposition: form-data; name="%s"; filename="%s"\r\n'
+                 % (key, filename)).encode()
             )
-            body.extend(
-                ("Content-Type: %s\r\n\r\n" % mime).encode()
-            )
+            body.extend(("Content-Type: %s\r\n\r\n" % mime).encode())
             body.extend(content)
             body.extend(b"\r\n")
 
@@ -247,25 +94,18 @@ def telegram(method, data=None, files=None, timeout=120):
             url,
             data=bytes(body),
             headers={
-                "Content-Type": "multipart/form-data; boundary=" + boundary,
+                "Content-Type": "multipart/form-data; boundary=" + boundary
             },
         )
-
     else:
         encoded = urllib.parse.urlencode(data).encode("utf-8")
         req = urllib.request.Request(url, data=encoded)
 
     try:
         with urllib.request.urlopen(req, timeout=timeout) as response:
-            result = json.loads(
-                response.read().decode("utf-8")
-            )
-
+            result = json.loads(response.read().decode("utf-8"))
     except Exception as exc:
-        log_exception("Telegram API error: " + method, exc)
-        raise RuntimeError(
-            "Telegram API error: " + str(exc)
-        )
+        raise RuntimeError("Telegram API error: " + str(exc))
 
     if not result.get("ok"):
         raise RuntimeError(
@@ -276,10 +116,7 @@ def telegram(method, data=None, files=None, timeout=120):
 
 
 def send_message(chat_id, text, reply_markup=None):
-    data = {
-        "chat_id": chat_id,
-        "text": text,
-    }
+    data = {"chat_id": chat_id, "text": text}
 
     if reply_markup:
         data["reply_markup"] = json.dumps(
@@ -313,20 +150,11 @@ def answer_callback(callback_id, text=""):
                 "text": text,
             },
         )
-    except Exception as exc:
-        log_error("answerCallbackQuery failed: " + repr(exc))
+    except Exception:
+        pass
 
 
 def send_video(chat_id, path, caption):
-    log_error(
-        "Sending video | chat_id=%s | path=%s | size=%s"
-        % (
-            chat_id,
-            path,
-            os.path.getsize(path) if os.path.isfile(path) else "missing",
-        )
-    )
-
     with open(path, "rb") as f:
         telegram(
             "sendVideo",
@@ -346,16 +174,10 @@ def send_video(chat_id, path, caption):
         )
 
 
-# =========================
-# QURAN SURAH LIST
-# =========================
-
 def get_surahs():
     global _SURAH_CACHE
 
     if _SURAH_CACHE is None:
-        log_error("Fetching surah list from Quran API.")
-
         data = qv.get_json(QURAN_API + "/surah")
 
         if not isinstance(data, dict) or data.get("code") != 200:
@@ -364,28 +186,20 @@ def get_surahs():
             )
 
         _SURAH_CACHE = data["data"]
-        log_error(
-            "Surah list loaded: %d surahs."
-            % len(_SURAH_CACHE)
-        )
 
     return _SURAH_CACHE
 
 
 def keyboard_reciters():
     rows = []
-    items = list(RECITERS.items())
 
-    for i in range(0, len(items), 2):
-        row = []
-
-        for reciter_id, reciter in items[i:i + 2]:
-            row.append({
+    for reciter_id, reciter in RECITERS.items():
+        rows.append([
+            {
                 "text": reciter["name"],
                 "callback_data": "reciter:" + reciter_id,
-            })
-
-        rows.append(row)
+            }
+        ])
 
     return {"inline_keyboard": rows}
 
@@ -425,6 +239,7 @@ def keyboard_surahs(page=0):
     if nav:
         rows.append(nav)
 
+    # Let the user return to the reciter selection.
     rows.append([
         {
             "text": "🎙️ گۆڕینی قاری",
@@ -435,409 +250,63 @@ def keyboard_surahs(page=0):
     return {"inline_keyboard": rows}
 
 
-# =========================
-# DOWNLOAD FILES WITH RETRIES
-# =========================
+def download_selected_reciter_audio(ayah, output_path, reciter_id):
+    """Download the selected reciter's audio for one ayah."""
 
-def download_file(url, output_path, min_size=100):
-    """
-    Download a file with retries and detailed logging.
-
-    GitHub Releases URLs remain unchanged.
-    Incomplete files are not kept as completed downloads.
-    """
-
-    urls = []
-    normalized = normalize_github_url(url)
-    urls.append(normalized)
-
-    if url not in urls:
-        urls.append(url)
-
-    last_error = None
-
-    os.makedirs(
-        os.path.dirname(output_path) or ".",
-        exist_ok=True,
-    )
-
-    for current_url in urls:
-        for attempt in range(1, 6):
-            temp_path = output_path + ".part"
-
-            try:
-                log_error(
-                    "DOWNLOAD START | attempt=%d/5 | URL=%s"
-                    % (attempt, current_url)
-                )
-
-                request = urllib.request.Request(
-                    current_url,
-                    headers={
-                        "User-Agent": "Mozilla/5.0 QuranVideoBot/1.0",
-                        "Accept": "*/*",
-                        "Connection": "close",
-                    },
-                )
-
-                with urllib.request.urlopen(
-                    request,
-                    timeout=90,
-                ) as response:
-                    content = response.read()
-                    status = response.getcode()
-                    content_type = response.headers.get(
-                        "Content-Type", ""
-                    )
-
-                if status != 200:
-                    raise RuntimeError(
-                        "HTTP status: %s" % status
-                    )
-
-                if len(content) < min_size:
-                    raise RuntimeError(
-                        "فایلە وەرگیراوەکە زۆر بچووکە: "
-                        + str(len(content))
-                        + " bytes"
-                    )
-
-                beginning = content[:500].lstrip().lower()
-
-                if (
-                    beginning.startswith(b"<!doctype html")
-                    or beginning.startswith(b"<html")
-                    or b"service temporarily unavailable" in beginning
-                    or b"502 bad gateway" in beginning
-                    or b"503 service unavailable" in beginning
-                ):
-                    raise RuntimeError(
-                        "سێرڤەر HTML ـی ناردووە لەبری فایل."
-                    )
-
-                with open(temp_path, "wb") as f:
-                    f.write(content)
-                    f.flush()
-
-                os.replace(temp_path, output_path)
-
-                log_error(
-                    "DOWNLOAD SUCCESS | URL=%s | bytes=%d | type=%s"
-                    % (
-                        current_url,
-                        len(content),
-                        content_type,
-                    )
-                )
-
-                return output_path
-
-            except urllib.error.HTTPError as exc:
-                last_error = exc
-
-                log_error(
-                    "DOWNLOAD HTTP ERROR | attempt=%d/5 | "
-                    "status=%s | URL=%s | reason=%s"
-                    % (
-                        attempt,
-                        exc.code,
-                        current_url,
-                        exc.reason,
-                    )
-                )
-
-            except Exception as exc:
-                last_error = exc
-
-                log_exception(
-                    "DOWNLOAD FAILED | attempt=%d/5 | URL=%s"
-                    % (attempt, current_url),
-                    exc,
-                )
-
-            finally:
-                try:
-                    if os.path.exists(temp_path):
-                        os.remove(temp_path)
-                except OSError:
-                    pass
-
-            if attempt < 5:
-                wait_seconds = min(3 * attempt, 12)
-
-                log_error(
-                    "Retrying download in %d seconds."
-                    % wait_seconds
-                )
-
-                time.sleep(wait_seconds)
-
-    raise RuntimeError(
-        "دابەزاندنی فایل سەرکەوتوو نەبوو.\n"
-        "URL: " + str(url) + "\n"
-        "هەڵەی کۆتایی: " + str(last_error) + "\n"
-        "Log: " + LOG_PATH
-    )
-
-
-# =========================
-# DOWNLOAD RECITER AUDIO
-# =========================
-
-def download_surah_audio(surah_number, reciter_id, output_path):
     reciter = RECITERS.get(str(reciter_id))
 
     if not reciter:
         raise ValueError("قاریی هەڵبژێردراو دروست نییە.")
 
-    filename = "%03d.mp3" % int(surah_number)
+    surah_number = int(ayah["surah_number"])
+    ayah_number = int(ayah["ayah_number"])
+
+    filename = "%03d%03d.mp3" % (
+        surah_number,
+        ayah_number,
+    )
+
     url = reciter["base"] + filename
 
-    log_error(
-        "AUDIO REQUEST | reciter_id=%s | reciter=%s | surah=%s | URL=%s"
-        % (
-            reciter_id,
-            reciter["name"],
-            surah_number,
-            url,
-        )
+    request = urllib.request.Request(
+        url,
+        headers={"User-Agent": "QuranVideoBot/1.0"},
     )
 
     try:
-        download_file(url, output_path, min_size=1000)
+        with urllib.request.urlopen(request, timeout=60) as response:
+            audio_data = response.read()
 
-        proc = subprocess.run(
-            [
-                "ffprobe",
-                "-v", "error",
-                "-show_entries", "format=duration",
-                "-of", "default=noprint_wrappers=1:nokey=1",
-                output_path,
-            ],
-            stdout=subprocess.PIPE,
-            stderr=subprocess.PIPE,
-            text=True,
-        )
+        if not audio_data or len(audio_data) < 100:
+            raise RuntimeError("فایلی دەنگەکە بەتاڵە.")
 
-        if proc.returncode != 0:
-            log_error(
-                "FFPROBE FAILED | URL=%s | stderr=%s"
-                % (url, proc.stderr[-1000:])
-            )
+        with open(output_path, "wb") as f:
+            f.write(audio_data)
 
-            raise RuntimeError(
-                "فایلی دابەزێنراو MP3 ـێکی دروست نییە."
-            )
+    except Exception as exc:
+        try:
+            if os.path.exists(output_path):
+                os.remove(output_path)
+        except OSError:
+            pass
 
-        duration = float(proc.stdout.strip())
-
-        if duration <= 0:
-            raise RuntimeError("ماوەی دەنگەکە دروست نییە.")
-
-        log_error(
-            "AUDIO VERIFIED | reciter=%s | surah=%s | duration=%s"
+        raise RuntimeError(
+            "نەتوانرا دەنگی قاری (%s) بۆ سوورەت %d، ئایەت %d "
+            "وەربگیرێت. لینکی دەنگ یان ناوی فایلەکە ڕەنگە جیاواز بێت. "
+            "هۆکار: %s"
             % (
                 reciter["name"],
                 surah_number,
-                duration,
+                ayah_number,
+                str(exc),
             )
         )
 
-    except Exception as exc:
-        log_exception("Audio download/verification failed", exc)
-
-        raise RuntimeError(
-            "نەتوانرا دەنگی سوورەتەکە وەربگیرێت.\n"
-            "قاری: %s\n"
-            "URL: %s\n"
-            "هۆکار: %s"
-            % (reciter["name"], url, exc)
-        )
-
-
-# =========================
-# AYAH TIMING DATABASE
-# =========================
-
-def valid_timings_database(db_path):
-    """Check whether a timings database is readable and has the expected table."""
-
-    conn = None
-
-    try:
-        conn = sqlite3.connect(db_path)
-
-        conn.execute(
-            "SELECT sura, ayah, time FROM timings LIMIT 1"
-        )
-
-        return True
-
-    except Exception as exc:
-        log_error(
-            "INVALID TIMINGS DATABASE | path=%s | error=%r"
-            % (db_path, exc)
-        )
-        return False
-
-    finally:
-        if conn is not None:
-            conn.close()
-
-
-def download_timings_database(reciter_id):
-    os.makedirs(TIMINGS_DIR, exist_ok=True)
-
-    db_path = os.path.join(
-        TIMINGS_DIR,
-        str(reciter_id) + ".db",
-    )
-
-    if os.path.exists(db_path):
-        if valid_timings_database(db_path):
-            log_error(
-                "Using cached timings database: " + db_path
-            )
-            return db_path
-
-        try:
-            os.remove(db_path)
-        except OSError as exc:
-            log_error(
-                "Could not remove invalid timings DB: "
-                + repr(exc)
-            )
-
-    url = TIMINGS_BASE_URL + str(reciter_id) + ".db"
-
-    log_error(
-        "TIMINGS DATABASE REQUEST | ID=%s | URL=%s"
-        % (reciter_id, url)
-    )
-
-    try:
-        download_file(url, db_path, min_size=100)
-
-        if not valid_timings_database(db_path):
-            raise RuntimeError(
-                "داتابەیسی دابەزێنراو خشتەی timings ـی دروستی تێدا نییە."
-            )
-
-        log_error(
-            "TIMINGS DATABASE READY | ID=%s | path=%s"
-            % (reciter_id, db_path)
-        )
-
-        return db_path
-
-    except Exception as exc:
-        log_exception(
-            "Timings database download failed for ID="
-            + str(reciter_id),
-            exc,
-        )
-
-        if os.path.exists(db_path):
-            try:
-                os.remove(db_path)
-            except OSError:
-                pass
-
-        raise RuntimeError(
-            "نەتوانرا داتابەیسی کاتی قاری وەربگیرێت.\n"
-            "ID: %s\nURL: %s\nهۆکار: %s\nLog: %s"
-            % (reciter_id, url, exc, LOG_PATH)
-        )
-
-
-def get_ayah_timings(reciter_id, surah_number):
-    db_path = download_timings_database(reciter_id)
-
-    conn = sqlite3.connect(db_path)
-
-    try:
-        rows = conn.execute(
-            """
-            SELECT sura, ayah, time
-            FROM timings
-            WHERE sura = ?
-            ORDER BY ayah
-            """,
-            (int(surah_number),),
-        ).fetchall()
-
-    finally:
-        conn.close()
-
-    if not rows:
-        raise RuntimeError(
-            "هیچ زانیارییەکی timing بۆ ئەم سوورەتە "
-            "لە داتابەیسدا نییە."
-        )
-
-    result = {}
-
-    for sura, ayah, start_time in rows:
-        result[int(ayah)] = float(start_time)
-
-    largest = max(result.values())
-
-    if largest >= 10000:
-        result = {
-            ayah: value / 1000.0
-            for ayah, value in result.items()
-        }
-
-    return result
-
-
-def get_audio_duration(audio_path):
-    proc = subprocess.run(
-        [
-            "ffprobe",
-            "-v", "error",
-            "-show_entries", "format=duration",
-            "-of", "default=noprint_wrappers=1:nokey=1",
-            audio_path,
-        ],
-        stdout=subprocess.PIPE,
-        stderr=subprocess.PIPE,
-        text=True,
-    )
-
-    if proc.returncode != 0:
-        log_error(
-            "GET AUDIO DURATION FAILED | path=%s | stderr=%s"
-            % (audio_path, proc.stderr[-1000:])
-        )
-
-        raise RuntimeError(
-            "نەتوانرا ماوەی فایلە دەنگەکە بخوێندرێتەوە."
-        )
-
-    try:
-        duration = float(proc.stdout.strip())
-
-    except Exception:
-        raise RuntimeError(
-            "ماوەی فایلە دەنگەکە دروست نییە."
-        )
-
-    if duration <= 0:
-        raise RuntimeError("ماوەی دەنگەکە صفرە.")
-
-    return duration
-
-
-# =========================
-# READ AYAH TEXT FROM QURAN DB
-# =========================
 
 def find_surah_rows(surah_number, start_ayah, end_ayah):
     if end_ayah < start_ayah:
         raise ValueError(
-            "ئایەتی کۆتایی دەبێت گەورەتر یان یەکسان "
-            "بێت بە ئایەتی دەستپێک."
+            "ئایەتی کۆتایی دەبێت گەورەتر یان یەکسان بێت بە ئایەتی دەستپێک."
         )
 
     count = end_ayah - start_ayah + 1
@@ -861,10 +330,7 @@ def find_surah_rows(surah_number, start_ayah, end_ayah):
     if not surah:
         raise ValueError("سوورەتەکە نەدۆزرایەوە.")
 
-    if (
-        start_ayah < 1
-        or end_ayah > int(surah["numberOfAyahs"])
-    ):
+    if start_ayah < 1 or end_ayah > int(surah["numberOfAyahs"]):
         raise ValueError(
             "ژمارەی ئایەت دەبێت لە 1 تا %d بێت."
             % int(surah["numberOfAyahs"])
@@ -905,7 +371,7 @@ def find_surah_rows(surah_number, start_ayah, end_ayah):
             % table_name.replace('"', '""')
         ).fetchall()
 
-        columns = {
+        actual_columns = {
             str(row["name"]).lower(): str(row["name"])
             for row in column_rows
         }
@@ -919,8 +385,8 @@ def find_surah_rows(surah_number, start_ayah, end_ayah):
         )
 
         missing = [
-            column for column in required
-            if column not in columns
+            name for name in required
+            if name not in actual_columns
         ]
 
         if missing:
@@ -929,25 +395,28 @@ def find_surah_rows(surah_number, start_ayah, end_ayah):
                 + ", ".join(missing)
             )
 
-        def quoted(column):
-            return '"' + column.replace('"', '""') + '"'
+        sura_id_col = actual_columns["suraid"]
+        ayah_col = actual_columns["ayah"]
+        text_col = actual_columns["text"]
+        tafsir_col = actual_columns["asan"]
+        name_col = actual_columns["sura_name_ar"]
 
         sql = (
-            "SELECT "
-            + quoted(columns["sura_name_ar"]) + " AS sura_name, "
-            + quoted(columns["ayah"]) + " AS ayah_number, "
-            + quoted(columns["text"]) + " AS arabic_text, "
-            + quoted(columns["asan"]) + " AS tafsir_text "
-            + "FROM " + quoted(table_name) + " "
-            + "WHERE CAST("
-            + quoted(columns["suraid"])
-            + " AS INTEGER)=? "
-            + "AND CAST("
-            + quoted(columns["ayah"])
-            + " AS INTEGER) BETWEEN ? AND ? "
-            + "ORDER BY CAST("
-            + quoted(columns["ayah"])
-            + " AS INTEGER)"
+            'SELECT "{name}" AS sura_name, '
+            '"{ayah}" AS ayah_number, '
+            '"{text}" AS arabic_text, '
+            '"{tafsir}" AS tafsir_text '
+            'FROM "{table}" '
+            'WHERE CAST("{sura_id}" AS INTEGER)=? '
+            'AND CAST("{ayah}" AS INTEGER) BETWEEN ? AND ? '
+            'ORDER BY CAST("{ayah}" AS INTEGER)'
+        ).format(
+            name=name_col.replace('"', '""'),
+            ayah=ayah_col.replace('"', '""'),
+            text=text_col.replace('"', '""'),
+            tafsir=tafsir_col.replace('"', '""'),
+            table=table_name.replace('"', '""'),
+            sura_id=sura_id_col.replace('"', '""'),
         )
 
         rows = conn.execute(
@@ -961,13 +430,18 @@ def find_surah_rows(surah_number, start_ayah, end_ayah):
 
         if len(rows) != count:
             raise RuntimeError(
-                "ئایەتە داواکراوەکان لە داتابەیسدا "
-                "بە تەواوی نەدۆزرایەوە."
+                "ئایەتە داواکراوەکان لە داتابەیسدا بە تەواوی نەدۆزرایەوە."
             )
+
+        global_start = sum(
+            int(s["numberOfAyahs"])
+            for s in surahs
+            if int(s["number"]) < int(surah_number)
+        ) + int(start_ayah)
 
         result = []
 
-        for row in rows:
+        for index, row in enumerate(rows):
             arabic = str(row["arabic_text"] or "").strip()
             tafsir = str(row["tafsir_text"] or "").strip()
 
@@ -976,21 +450,20 @@ def find_surah_rows(surah_number, start_ayah, end_ayah):
                     "دەقی عەرەبی ئایەت بەتاڵە."
                 )
 
+            db_surah_name = str(
+                row["sura_name"] or ""
+            ).strip()
+
             result.append({
                 "surah_number": int(surah_number),
-                "surah_name": str(
-                    row["sura_name"] or surah["name"]
-                ).strip(),
+                "surah_name": db_surah_name or surah["name"],
                 "ayah_number": int(row["ayah_number"]),
+                "global_number": global_start + index,
                 "arabic": arabic,
-                "tafsir": (
-                    tafsir
-                    or "تەفسیری ئەم ئایەتە بەردەست نییە."
-                ),
-                "translation": (
-                    tafsir
-                    or "تەفسیری ئەم ئایەتە بەردەست نییە."
-                ),
+                "tafsir": tafsir or
+                    "تەفسیری ئەم ئایەتە لە داتابەیسدا بەردەست نییە.",
+                "translation": tafsir or
+                    "تەفسیری ئەم ئایەتە لە داتابەیسدا بەردەست نییە.",
             })
 
         return result
@@ -999,15 +472,7 @@ def find_surah_rows(surah_number, start_ayah, end_ayah):
         conn.close()
 
 
-# =========================
-# VIDEO CREATION
-# =========================
-
 def run_ffmpeg(args):
-    log_error(
-        "FFMPEG START | " + " ".join(str(arg) for arg in args)
-    )
-
     proc = subprocess.run(
         args,
         stdout=subprocess.PIPE,
@@ -1016,14 +481,8 @@ def run_ffmpeg(args):
     )
 
     if proc.returncode != 0:
-        log_error(
-            "FFMPEG FAILED | returncode=%s | stderr=%s"
-            % (proc.returncode, proc.stderr[-3000:])
-        )
-
         raise RuntimeError(
-            "FFmpeg: "
-            + (proc.stderr[-1500:] or "هەڵەی نەناسراو")
+            "FFmpeg: " + (proc.stderr[-1200:] or "هەڵەی نەناسراو")
         )
 
 
@@ -1038,79 +497,18 @@ def build_video(chat_id, ayahs, reciter_id):
 
     os.makedirs(job_dir, exist_ok=True)
 
-    log_error(
-        "VIDEO JOB START | chat_id=%s | reciter_id=%s | job_dir=%s"
-        % (chat_id, reciter_id, job_dir)
-    )
-
     try:
-        surah_number = int(ayahs[0]["surah_number"])
-
-        full_audio_path = os.path.join(
-            job_dir,
-            "%03d.mp3" % surah_number,
-        )
-
-        download_surah_audio(
-            surah_number,
-            reciter_id,
-            full_audio_path,
-        )
-
-        timings = get_ayah_timings(
-            reciter_id,
-            surah_number,
-        )
-
-        audio_duration = get_audio_duration(
-            full_audio_path
-        )
-
         clips = []
 
         for i, ayah in enumerate(ayahs, 1):
-            ayah_number = int(ayah["ayah_number"])
-
-            if ayah_number not in timings:
-                raise RuntimeError(
-                    "کاتی ئایەتی %d لە داتابەیسدا نییە."
-                    % ayah_number
-                )
-
-            start_time = timings[ayah_number]
-
-            if ayah_number + 1 in timings:
-                end_time = timings[ayah_number + 1]
-            else:
-                end_time = audio_duration
-
-            if end_time <= start_time:
-                raise RuntimeError(
-                    "کاتی timing بۆ ئایەتی %d دروست نییە."
-                    % ayah_number
-                )
-
-            end_time = min(end_time, audio_duration)
-            duration = end_time - start_time
-
-            if (
-                start_time < 0
-                or start_time >= audio_duration
-                or duration <= 0
-            ):
-                raise RuntimeError(
-                    "کاتی ئایەتی %d لە سنووری دەنگەکەدا نییە."
-                    % ayah_number
-                )
-
             image_path = os.path.join(
-                job_dir,
-                "image_%03d.png" % i,
+                job_dir, "image_%03d.png" % i
             )
-
+            audio_path = os.path.join(
+                job_dir, "audio_%03d.mp3" % i
+            )
             clip_path = os.path.join(
-                job_dir,
-                "clip_%03d.mp4" % i,
+                job_dir, "clip_%03d.mp4" % i
             )
 
             qv.create_ayah_image(
@@ -1119,15 +517,18 @@ def build_video(chat_id, ayahs, reciter_id):
                 image_path,
             )
 
+            # Download audio from the selected reciter.
+            download_selected_reciter_audio(
+                ayah,
+                audio_path,
+                reciter_id,
+            )
+
             run_ffmpeg([
                 "ffmpeg", "-y",
                 "-loop", "1",
                 "-i", image_path,
-                "-ss", "%.3f" % start_time,
-                "-i", full_audio_path,
-                "-map", "0:v:0",
-                "-map", "1:a:0",
-                "-t", "%.3f" % duration,
+                "-i", audio_path,
                 "-c:v", "libx264",
                 "-tune", "stillimage",
                 "-c:a", "aac",
@@ -1143,17 +544,14 @@ def build_video(chat_id, ayahs, reciter_id):
 
             clips.append(clip_path)
 
-        list_path = os.path.join(
-            job_dir,
-            "clips.txt",
-        )
+        list_path = os.path.join(job_dir, "clips.txt")
 
-        with open(
-            list_path, "w", encoding="utf-8"
-        ) as f:
+        with open(list_path, "w", encoding="utf-8") as f:
             for clip in clips:
-                safe_clip = clip.replace("'", "'\\''")
-                f.write("file '%s'\n" % safe_clip)
+                f.write(
+                    "file '%s'\n"
+                    % clip.replace("'", "'\\''")
+                )
 
         output = os.path.join(
             job_dir,
@@ -1170,35 +568,17 @@ def build_video(chat_id, ayahs, reciter_id):
             output,
         ])
 
-        if (
-            not os.path.isfile(output)
-            or os.path.getsize(output) == 0
-        ):
-            raise RuntimeError(
-                "فایلی ڤیدیۆی کۆتایی دروست نەکرا."
-            )
-
-        log_error(
-            "VIDEO JOB SUCCESS | output=%s | size=%s"
-            % (output, os.path.getsize(output))
-        )
-
         return output, job_dir
 
-    except Exception as exc:
-        log_exception("VIDEO JOB FAILED", exc)
+    except Exception:
         shutil.rmtree(job_dir, ignore_errors=True)
         raise
 
 
-# =========================
-# BOT COMMANDS
-# =========================
-
 def start(chat_id):
-    log_error("START COMMAND | chat_id=%s" % chat_id)
-
-    SESSIONS[chat_id] = {"state": "reciter"}
+    SESSIONS[chat_id] = {
+        "state": "reciter",
+    }
 
     send_message(
         chat_id,
@@ -1209,17 +589,13 @@ def start(chat_id):
 
 
 def handle_message(message):
-    chat_id = message.get("chat", {}).get("id")
+    chat = message.get("chat", {})
+    chat_id = chat.get("id")
 
     if chat_id is None:
         return
 
     text = (message.get("text") or "").strip()
-
-    log_error(
-        "MESSAGE RECEIVED | chat_id=%s | text=%s"
-        % (chat_id, text[:150])
-    )
 
     if text.startswith("/start"):
         start(chat_id)
@@ -1239,11 +615,9 @@ def handle_message(message):
 
     if text.startswith("/cancel"):
         SESSIONS.pop(chat_id, None)
-
         send_message(
             chat_id,
-            "داواکارییەکەت هەڵوەشایەوە. "
-            "بۆ دەستپێکردن /start بنووسە.",
+            "داواکارییەکەت هەڵوەشایەوە. بۆ دەستپێکردن /start بنووسە.",
         )
         return
 
@@ -1265,13 +639,9 @@ def handle_message(message):
                 if int(s["number"]) == session["surah_number"]
             )
 
-            if (
-                number < 1
-                or number > int(surah["numberOfAyahs"])
-            ):
+            if number < 1 or number > int(surah["numberOfAyahs"]):
                 raise ValueError(
-                    "ژمارەی ئایەت لە 1 تا %d بێت."
-                    % int(surah["numberOfAyahs"])
+                    "ژمارەی ئایەت لە سنوورەکەدا نییە."
                 )
 
             session["start_ayah"] = number
@@ -1281,18 +651,10 @@ def handle_message(message):
                 chat_id,
                 "ئایەتی دەستپێک: %d\n"
                 "ئێستا ژمارەی ئایەتی کۆتایی بنووسە (1–%d)."
-                % (
-                    number,
-                    int(surah["numberOfAyahs"]),
-                ),
+                % (number, int(surah["numberOfAyahs"])),
             )
 
         except Exception as exc:
-            log_error(
-                "START AYAH INPUT ERROR | chat_id=%s | %r"
-                % (chat_id, exc)
-            )
-
             send_message(
                 chat_id,
                 "ژمارەیەکی دروست بنووسە. " + str(exc),
@@ -1309,18 +671,6 @@ def handle_message(message):
             start_ayah = session["start_ayah"]
             reciter_id = session["reciter_id"]
 
-            log_error(
-                "VIDEO REQUEST | chat_id=%s | reciter=%s | "
-                "surah=%s | ayahs=%s-%s"
-                % (
-                    chat_id,
-                    reciter_id,
-                    surah_number,
-                    start_ayah,
-                    end_ayah,
-                )
-            )
-
             ayahs = find_surah_rows(
                 surah_number,
                 start_ayah,
@@ -1332,7 +682,7 @@ def handle_message(message):
                 if int(s["number"]) == surah_number
             )
 
-            reciter_name = RECITERS[str(reciter_id)]["name"]
+            reciter_name = RECITERS[reciter_id]["name"]
 
             send_message(
                 chat_id,
@@ -1375,22 +725,10 @@ def handle_message(message):
             )
 
         except Exception as exc:
-            log_exception(
-                "VIDEO CREATION ERROR | chat_id=%s" % chat_id,
-                exc,
+            send_message(
+                chat_id,
+                "❌ نەمتوانی ڤیدیۆکە دروست بکەم.\n" + str(exc),
             )
-
-            try:
-                send_message(
-                    chat_id,
-                    "❌ نەمتوانی ڤیدیۆکە دروست بکەم.\n"
-                    + str(exc),
-                )
-            except Exception as send_exc:
-                log_exception(
-                    "Could not send error to Telegram",
-                    send_exc,
-                )
 
         finally:
             SESSIONS.pop(chat_id, None)
@@ -1406,10 +744,6 @@ def handle_message(message):
     )
 
 
-# =========================
-# INLINE BUTTONS
-# =========================
-
 def handle_callback(callback):
     callback_id = callback.get("id")
     message = callback.get("message", {})
@@ -1417,18 +751,15 @@ def handle_callback(callback):
     message_id = message.get("message_id")
     data = callback.get("data", "")
 
-    log_error(
-        "CALLBACK RECEIVED | chat_id=%s | data=%s"
-        % (chat_id, data)
-    )
-
     if chat_id is None:
         answer_callback(callback_id)
         return
 
     try:
         if data == "change_reciter":
-            SESSIONS[chat_id] = {"state": "reciter"}
+            SESSIONS[chat_id] = {
+                "state": "reciter",
+            }
 
             edit_message(
                 chat_id,
@@ -1445,15 +776,6 @@ def handle_callback(callback):
 
             if reciter_id not in RECITERS:
                 raise ValueError("قارییەکە نەدۆزرایەوە.")
-
-            log_error(
-                "RECITER SELECTED | chat_id=%s | id=%s | name=%s"
-                % (
-                    chat_id,
-                    reciter_id,
-                    RECITERS[reciter_id]["name"],
-                )
-            )
 
             SESSIONS[chat_id] = {
                 "state": "surah",
@@ -1497,7 +819,6 @@ def handle_callback(callback):
 
             if not session or not session.get("reciter_id"):
                 start(chat_id)
-
                 answer_callback(
                     callback_id,
                     "سەرەتا قاری هەڵبژێرە.",
@@ -1511,12 +832,10 @@ def handle_callback(callback):
                 if int(s["number"]) == number
             )
 
-            reciter_id = str(session["reciter_id"])
-
             SESSIONS[chat_id] = {
                 "state": "start_ayah",
                 "surah_number": number,
-                "reciter_id": reciter_id,
+                "reciter_id": session["reciter_id"],
             }
 
             edit_message(
@@ -1527,7 +846,7 @@ def handle_callback(callback):
                 "ژمارەی ئایەتی دەستپێک بنووسە (1–%d).\n\n"
                 "بۆ هەڵوەشاندنەوە /cancel بنووسە."
                 % (
-                    RECITERS[reciter_id]["name"],
+                    RECITERS[session["reciter_id"]]["name"],
                     surah["name"],
                     int(surah["numberOfAyahs"]),
                 ),
@@ -1542,44 +861,27 @@ def handle_callback(callback):
         answer_callback(callback_id)
 
     except Exception as exc:
-        log_exception(
-            "CALLBACK ERROR | data=%s" % data,
-            exc,
+        answer_callback(
+            callback_id,
+            str(exc)[:180],
         )
 
-        answer_callback(callback_id, str(exc)[:180])
-
-
-# =========================
-# MAIN LOOP
-# =========================
 
 def main():
-    log_error("========== BOT STARTING ==========")
-    log_error("Python version: " + sys.version.replace("\n", " "))
-    log_error("Base directory: " + BASE_DIR)
-    log_error("Log file: " + LOG_PATH)
-
     if shutil.which("ffmpeg") is None:
         raise SystemExit(
             "FFmpeg دامەزرێنە؛ بۆ ئەم بۆتە پێویستە."
         )
 
-    if shutil.which("ffprobe") is None:
-        raise SystemExit(
-            "ffprobe لەگەڵ FFmpeg پێویستە."
-        )
-
     if not os.path.exists(
         os.path.join(BASE_DIR, "quran.ttf")
     ):
-        log_error(
-            "WARNING: quran.ttf was not found in the bot directory."
+        print(
+            "ئاگاداری: quran.ttf لە هەمان فۆڵدەری کۆدەکە دابنێ."
         )
 
-    log_error(
-        "Bot running; each video is sent only "
-        "to its requesting chat."
+    print(
+        "Bot running; each video is sent only to its requesting chat."
     )
 
     offset = None
@@ -1613,21 +915,16 @@ def main():
                     handle_callback(update["callback_query"])
 
         except KeyboardInterrupt:
-            log_error("Bot stopped by keyboard interrupt.")
             break
 
         except Exception as exc:
-            log_exception("POLLING ERROR", exc)
+            print(
+                "Polling error:",
+                exc,
+                file=sys.stderr,
+            )
             time.sleep(3)
 
 
 if __name__ == "__main__":
-    try:
-        main()
-
-    except KeyboardInterrupt:
-        log_error("Bot stopped.")
-
-    except Exception as exc:
-        log_exception("FATAL BOT ERROR", exc)
-        raise
+    main()
