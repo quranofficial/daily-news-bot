@@ -32,6 +32,9 @@ OUTPUT_VIDEO = os.path.join(BASE_DIR, "quran_nightly.mp4")
 # Quran font: ONLY for Arabic Quran verses
 QURAN_FONT_PATH = os.path.join(BASE_DIR, "quran.ttf")
 
+# Tafsir font: Tafsir and footer brand text
+TAFSIR_FONT_PATH = os.path.join(BASE_DIR, "rabartafsir.ttf")
+
 DB_URL = (
     "https://raw.githubusercontent.com/"
     "sahanddler/home_dialog/main/quran.db"
@@ -151,7 +154,7 @@ def find_font():
     )
 
 
-# System font: ALL Kurdish text and labels
+# System font: Surah name, ayah number and other Kurdish labels
 SYSTEM_FONT_PATH = find_font()
 
 
@@ -185,6 +188,25 @@ def make_quran_font(size):
     except Exception as error:
         raise RuntimeError(
             "نەتوانرا فۆنتی quran.ttf بخوێندرێتەوە. "
+            "دڵنیابە فایلەکە فۆنتێکی دروستی TTF ـە.\n"
+            + str(error)
+        )
+
+
+def make_tafsir_font(size):
+    """Custom rabartafsir.ttf for tafsir and footer text."""
+    if not os.path.isfile(TAFSIR_FONT_PATH):
+        raise RuntimeError(
+            "فایلی rabartafsir.ttf نەدۆزرایەوە. "
+            "دڵنیابە لەوەی لە هەمان فۆڵدەری "
+            "quran_video.py ـدایە."
+        )
+
+    try:
+        return load_font(TAFSIR_FONT_PATH, size)
+    except Exception as error:
+        raise RuntimeError(
+            "نەتوانرا فۆنتی rabartafsir.ttf بخوێندرێتەوە. "
             "دڵنیابە فایلەکە فۆنتێکی دروستی TTF ـە.\n"
             + str(error)
         )
@@ -277,8 +299,12 @@ def draw_rtl_block(
     if not text:
         return top
 
-    # quran.ttf ONLY when explicitly requested for Quran verses
-    font_loader = make_quran_font if use_quran_font else make_font
+    # Quran verses use quran.ttf.
+    # Tafsir uses rabartafsir.ttf.
+    if use_quran_font:
+        font_loader = make_quran_font
+    else:
+        font_loader = make_tafsir_font
 
     selected_font = None
     selected_lines = None
@@ -502,21 +528,6 @@ def get_random_verses():
                 surah_number_column = column_lookup[alias]
                 break
 
-        surah_response = get_json(QURAN_API + "/surah")
-
-        if surah_response.get("code") != 200:
-            raise RuntimeError(
-                "نەتوانرا زانیاری سووڕەتەکان وەربگیرێت."
-            )
-
-        api_surahs = surah_response["data"]
-
-        api_name_to_number = {}
-
-        for surah in api_surahs:
-            normalized_name = normalize_arabic_name(surah["name"])
-            api_name_to_number[normalized_name] = int(surah["number"])
-
         numeric_surah_values = []
 
         if surah_number_column:
@@ -533,6 +544,21 @@ def get_random_verses():
             and min(numeric_surah_values) == 0
             and max(numeric_surah_values) <= 113
         )
+
+        surah_response = get_json(QURAN_API + "/surah")
+
+        if surah_response.get("code") != 200:
+            raise RuntimeError(
+                "نەتوانرا زانیاری سووڕەتەکان وەربگیرێت."
+            )
+
+        api_surahs = surah_response["data"]
+
+        api_name_to_number = {}
+
+        for surah in api_surahs:
+            normalized_name = normalize_arabic_name(surah["name"])
+            api_name_to_number[normalized_name] = int(surah["number"])
 
         name_order = []
 
@@ -759,7 +785,7 @@ def create_ayah_image(ayah, index, image_path):
         fill=gold
     )
 
-    # Surah name: Kurdish/system font, NOT quran.ttf
+    # Surah name: Kurdish/system font
     draw.text(
         (WIDTH // 2, 112),
         shape_rtl(ayah["surah_name"]),
@@ -821,7 +847,7 @@ def create_ayah_image(ayah, index, image_path):
             fill=gold
         )
 
-    # Arabic Quran text: ONLY this block uses quran.ttf
+    # Arabic Quran text: quran.ttf ONLY
     draw_rtl_block(
         draw,
         ayah["arabic"],
@@ -851,7 +877,7 @@ def create_ayah_image(ayah, index, image_path):
         width=1
     )
 
-    # Tafsir heading plaque: Kurdish/system font
+    # Tafsir heading plaque: rabartafsir.ttf
     draw.rounded_rectangle(
         (175, 640, WIDTH - 175, 687),
         radius=20,
@@ -863,7 +889,7 @@ def create_ayah_image(ayah, index, image_path):
     draw.text(
         (WIDTH // 2, 663),
         shape_rtl("تەفسیری ئاسان"),
-        font=make_font(27),
+        font=make_tafsir_font(27),
         fill=gold,
         anchor="mm",
         direction="rtl",
@@ -877,7 +903,7 @@ def create_ayah_image(ayah, index, image_path):
             fill=gold
         )
 
-    # Tafsir: Kurdish/system font ONLY
+    # Tafsir body: rabartafsir.ttf
     draw_rtl_block(
         draw,
         ayah["tafsir"],
@@ -908,11 +934,11 @@ def create_ayah_image(ayah, index, image_path):
         fill=gold
     )
 
-    # Brand footer: Kurdish/system font
+    # Brand footer: rabartafsir.ttf
     draw.text(
         (WIDTH // 2, 1160),
         shape_rtl("قورئانی پیرۆز - ڕێگای ئیسلام"),
-        font=make_font(23),
+        font=make_tafsir_font(23),
         fill=gold,
         anchor="mm",
         direction="rtl",
@@ -1135,10 +1161,16 @@ def main():
     if not shutil.which("ffmpeg"):
         raise RuntimeError("FFmpeg دامەزراو نییە.")
 
-    # Check custom Quran font before starting
+    # Check both custom fonts before starting
     if not os.path.isfile(QURAN_FONT_PATH):
         raise RuntimeError(
             "quran.ttf لە هەمان شوێنی quran_video.py نەدۆزرایەوە."
+        )
+
+    if not os.path.isfile(TAFSIR_FONT_PATH):
+        raise RuntimeError(
+            "rabartafsir.ttf لە هەمان شوێنی quran_video.py "
+            "نەدۆزرایەوە."
         )
 
     print("Starting Quran tafsir video...")
