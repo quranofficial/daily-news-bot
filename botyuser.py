@@ -24,7 +24,9 @@ BOT_TOKEN = os.environ["BOT_TOKEN"]
 TG = "https://api.telegram.org/bot" + BOT_TOKEN + "/"
 QURAN_API = "https://api.alquran.cloud/v1"
 
-MAX_AYAHS = max(1, int(os.environ.get("MAX_AYAHS_PER_VIDEO", "20")))
+# No fixed maximum ayah count per video.
+MAX_AYAHS = None
+
 POLL_TIMEOUT = 30
 
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
@@ -47,8 +49,6 @@ _SURAH_CACHE = None
 # =========================
 
 def log_error(message):
-    """Print log messages and save them to bot_debug.log."""
-
     line = (
         time.strftime("%Y-%m-%d %H:%M:%S")
         + " | "
@@ -81,12 +81,6 @@ def log_exception(context, exc):
 # =========================
 
 def normalize_github_url(url):
-    """
-    Convert GitHub blob/raw file URLs to raw.githubusercontent.com.
-
-    GitHub Releases URLs are intentionally left unchanged.
-    """
-
     url = str(url).strip()
 
     try:
@@ -126,8 +120,6 @@ def normalize_github_url(url):
 # =========================
 
 def load_reciters():
-    """Load enabled reciters from reciters.json."""
-
     if not os.path.isfile(RECITERS_JSON_PATH):
         raise FileNotFoundError(
             "فایلی reciters.json لە فۆڵدەری بۆتەکە نەدۆزرایەوە: "
@@ -364,6 +356,7 @@ def get_surahs():
             )
 
         _SURAH_CACHE = data["data"]
+
         log_error(
             "Surah list loaded: %d surahs."
             % len(_SURAH_CACHE)
@@ -440,13 +433,6 @@ def keyboard_surahs(page=0):
 # =========================
 
 def download_file(url, output_path, min_size=100):
-    """
-    Download a file with retries and detailed logging.
-
-    GitHub Releases URLs remain unchanged.
-    Incomplete files are not kept as completed downloads.
-    """
-
     urls = []
     normalized = normalize_github_url(url)
     urls.append(normalized)
@@ -660,8 +646,6 @@ def download_surah_audio(surah_number, reciter_id, output_path):
 # =========================
 
 def valid_timings_database(db_path):
-    """Check whether a timings database is readable and has the expected table."""
-
     conn = None
 
     try:
@@ -842,12 +826,7 @@ def find_surah_rows(surah_number, start_ayah, end_ayah):
 
     count = end_ayah - start_ayah + 1
 
-    if count > MAX_AYAHS:
-        raise ValueError(
-            "زۆرترین %d ئایەت بۆ هەر ڤیدیۆیەک ڕێگەپێدراوە."
-            % MAX_AYAHS
-        )
-
+    # No fixed maximum ayah count.
     surahs = get_surahs()
 
     surah = next(
@@ -1232,8 +1211,8 @@ def handle_message(message):
             "/cancel — هەڵوەشاندنەوە\n\n"
             "قاری هەڵبژێرە، سوورەت دیاری بکە، "
             "پاشان ژمارەی ئایەتی دەستپێک و کۆتایی بنووسە.\n"
-            "زۆرترین ئایەت بۆ هەر ڤیدیۆیەک: %d"
-            % MAX_AYAHS,
+            "ژمارەی ئایەتەکان بە پێی سنووری سوورەت "
+            "و توانای سێرڤەر دیاری دەکرێت.",
         )
         return
 
