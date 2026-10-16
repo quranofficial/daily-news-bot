@@ -1,11 +1,13 @@
 
-# -*- coding: utf-8 -*-
-"""Quran video image renderer with five visual designs."""
-
 import os
-import re
-import logging
-import textwrap
+import json
+import random
+import sqlite3
+import urllib.request
+import urllib.error
+import subprocess
+import glob
+import shutil
 import unicodedata
 
 from PIL import Image, ImageDraw, ImageFont
@@ -15,738 +17,1172 @@ from PIL import Image, ImageDraw, ImageFont
 # CONFIGURATION
 # =========================
 
+TOKEN = os.environ["BOT_TOKEN"]
+CHANNEL = os.environ["CHANNEL_ID"]
+
 WIDTH = 720
 HEIGHT = 1280
+AYAH_COUNT = 10
 
-BACKGROUND_DIR = os.path.dirname(os.path.abspath(__file__))
+BASE_DIR = os.path.dirname(os.path.abspath(__file__))
 
-QURAN_FONT_PATH = os.path.join(BACKGROUND_DIR, "quran.ttf")
-TAFSIR_FONT_PATH = os.path.join(BACKGROUND_DIR, "rabartafsir.ttf")
+WORK_DIR = os.path.join(BASE_DIR, "quran_video_work")
+OUTPUT_VIDEO = os.path.join(BASE_DIR, "quran_nightly.mp4")
 
-# فۆنتی جێگرەوە، ئەگەر فۆنتە سەرەکییەکان نەدۆزرێنەوە
-FALLBACK_FONT_PATHS = [
-    "/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf",
-    "/usr/share/fonts/truetype/freefont/FreeSans.ttf",
-]
+# Quran font: ONLY for Arabic Quran verses
+QURAN_FONT_PATH = os.path.join(BASE_DIR, "quran.ttf")
 
-logging.basicConfig(level=logging.INFO)
-log = logging.getLogger("quran_video")
+# Tafsir font: Tafsir and footer brand text
+TAFSIR_FONT_PATH = os.path.join(BASE_DIR, "rabartafsir.ttf")
 
+DB_URL = (
+    "https://raw.githubusercontent.com/"
+    "sahanddler/home_dialog/main/quran.db"
+)
+DB_PATH = os.path.join(BASE_DIR, "quran.db")
 
-# =========================
-# FIVE DESIGN PALETTES
-# =========================
+QURAN_API = "https://api.alquran.cloud/v1"
 
-DESIGNS = {
-    1: {
-        "name": "سەوز و زێڕین",
-        "background": (8, 48, 39),
-        "panel": (13, 65, 51),
-        "primary": (225, 190, 105),
-        "secondary": (244, 225, 169),
-        "text": (255, 249, 231),
-        "muted": (198, 216, 195),
-        "border": (190, 154, 77),
-    },
-    2: {
-        "name": "ڕەش و زێڕین",
-        "background": (15, 15, 18),
-        "panel": (29, 28, 29),
-        "primary": (226, 184, 83),
-        "secondary": (250, 220, 145),
-        "text": (255, 250, 235),
-        "muted": (202, 195, 177),
-        "border": (163, 125, 43),
-    },
-    3: {
-        "name": "شینی ئاسمانی",
-        "background": (9, 30, 58),
-        "panel": (15, 47, 80),
-        "primary": (91, 205, 239),
-        "secondary": (171, 231, 250),
-        "text": (245, 251, 255),
-        "muted": (180, 209, 228),
-        "border": (65, 155, 204),
-    },
-    4: {
-        "name": "کرێمی و کلاسیک",
-        "background": (242, 230, 203),
-        "panel": (250, 244, 226),
-        "primary": (129, 91, 49),
-        "secondary": (161, 119, 67),
-        "text": (60, 45, 31),
-        "muted": (117, 94, 67),
-        "border": (190, 164, 121),
-    },
-    5: {
-        "name": "مۆر و لاڤەندەر",
-        "background": (36, 22, 59),
-        "panel": (54, 35, 83),
-        "primary": (205, 164, 255),
-        "secondary": (230, 207, 255),
-        "text": (252, 246, 255),
-        "muted": (209, 190, 226),
-        "border": (155, 112, 202),
-    },
+HEADERS = {
+    "User-Agent": "QuranNightlyVideo/4.0"
 }
+
+
+# =========================
+# NETWORK HELPERS
+# =========================
+
+def get_json(url):
+    request = urllib.request.Request(url, headers=HEADERS)
+
+    with urllib.request.urlopen(request, timeout=60) as response:
+        return json.loads(response.read().decode("utf-8"))
+
+
+def run_command(command):
+    result = subprocess.run(
+        command,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        text=True
+    )
+
+    if result.returncode != 0:
+        raise RuntimeError(
+            "FFmpeg error:\n" + result.stderr[-5000:]
+        )
+
+
+def download_file(url, filename):
+    request = urllib.request.Request(url, headers=HEADERS)
+
+    with urllib.request.urlopen(request, timeout=120) as response:
+        with open(filename, "wb") as output:
+            shutil.copyfileobj(response, output)
+
+    if not os.path.isfile(filename) or os.path.getsize(filename) < 1000:
+        raise RuntimeError(
+            "فایل بە تەواوی دابەزێنراو نییە: " + filename
+        )
+
+
+# =========================
+# DOWNLOAD SQLITE DATABASE
+# =========================
+
+def ensure_database():
+    if os.path.isfile(DB_PATH) and os.path.getsize(DB_PATH) > 1000:
+        with open(DB_PATH, "rb") as file:
+            if file.read(16) == b"SQLite format 3\x00":
+                print("Using existing Quran database.")
+                return
+
+    print("Downloading Quran database...")
+
+    temporary_path = DB_PATH + ".download"
+
+    try:
+        download_file(DB_URL, temporary_path)
+
+        with open(temporary_path, "rb") as file:
+            signature = file.read(16)
+
+        if signature != b"SQLite format 3\x00":
+            raise RuntimeError(
+                "فایلی دابەزێنراو Database ـی SQLite نییە. "
+                "بەستەری quran.db بپشکنە."
+            )
+
+        os.replace(temporary_path, DB_PATH)
+
+    finally:
+        if os.path.exists(temporary_path):
+            os.remove(temporary_path)
+
+    print("Quran database downloaded successfully.")
 
 
 # =========================
 # FONT HELPERS
 # =========================
 
-def _find_font_path(preferred_path):
-    if preferred_path and os.path.isfile(preferred_path):
-        return preferred_path
+def find_font():
+    candidates = [
+        "/usr/share/fonts/truetype/noto/NotoSansArabic-Regular.ttf",
+        "/usr/share/fonts/truetype/noto/NotoNaskhArabic-Regular.ttf",
+        "/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf",
+    ]
 
-    for candidate in FALLBACK_FONT_PATHS:
-        if os.path.isfile(candidate):
-            return candidate
+    for path in candidates:
+        if os.path.isfile(path):
+            return path
 
-    return None
+    patterns = [
+        "/usr/share/fonts/**/*NotoSansArabic*.ttf",
+        "/usr/share/fonts/**/*NotoNaskhArabic*.ttf",
+        "/usr/share/fonts/**/*DejaVuSans.ttf",
+    ]
 
+    for pattern in patterns:
+        matches = glob.glob(pattern, recursive=True)
+        if matches:
+            return matches[0]
 
-def _load_font(preferred_path, size):
-    path = _find_font_path(preferred_path)
-
-    if path:
-        try:
-            return ImageFont.truetype(path, size=size)
-        except Exception as error:
-            log.warning("Could not load font %s: %s", path, error)
-
-    return ImageFont.load_default()
-
-
-def _quran_font(size):
-    return _load_font(QURAN_FONT_PATH, size)
-
-
-def _tafsir_font(size):
-    return _load_font(TAFSIR_FONT_PATH, size)
+    raise RuntimeError(
+        "فۆنتی بنەڕەتی بۆ دەقی کوردی نەدۆزرایەوە؛ "
+        "fonts-noto-core لە workflow دابمەزرێنە."
+    )
 
 
-def _text_width(draw, text, font):
+# System font: Surah name, ayah number and other Kurdish labels
+SYSTEM_FONT_PATH = find_font()
+
+
+def load_font(path, size):
     try:
-        return draw.textbbox((0, 0), text, font=font)[2]
-    except Exception:
-        return len(text) * getattr(font, "size", 20)
+        return ImageFont.truetype(
+            path,
+            size,
+            layout_engine=ImageFont.Layout.RAQM
+        )
+    except (AttributeError, ValueError):
+        return ImageFont.truetype(path, size)
 
 
-def _text_height(draw, text, font):
+def make_font(size):
+    """System font for Kurdish text and general labels."""
+    return load_font(SYSTEM_FONT_PATH, size)
+
+
+def make_quran_font(size):
+    """Custom quran.ttf font ONLY for Arabic Quran verses."""
+    if not os.path.isfile(QURAN_FONT_PATH):
+        raise RuntimeError(
+            "فایلی quran.ttf نەدۆزرایەوە. "
+            "دڵنیابە لەوەی لە هەمان فۆڵدەری "
+            "quran_video.py ـدایە."
+        )
+
     try:
-        box = draw.textbbox((0, 0), text, font=font)
-        return box[3] - box[1]
-    except Exception:
-        return getattr(font, "size", 20)
+        return load_font(QURAN_FONT_PATH, size)
+    except Exception as error:
+        raise RuntimeError(
+            "نەتوانرا فۆنتی quran.ttf بخوێندرێتەوە. "
+            "دڵنیابە فایلەکە فۆنتێکی دروستی TTF ـە.\n"
+            + str(error)
+        )
+
+
+def make_tafsir_font(size):
+    """Custom rabartafsir.ttf for tafsir and footer text."""
+    if not os.path.isfile(TAFSIR_FONT_PATH):
+        raise RuntimeError(
+            "فایلی rabartafsir.ttf نەدۆزرایەوە. "
+            "دڵنیابە لەوەی لە هەمان فۆڵدەری "
+            "quran_video.py ـدایە."
+        )
+
+    try:
+        return load_font(TAFSIR_FONT_PATH, size)
+    except Exception as error:
+        raise RuntimeError(
+            "نەتوانرا فۆنتی rabartafsir.ttf بخوێندرێتەوە. "
+            "دڵنیابە فایلەکە فۆنتێکی دروستی TTF ـە.\n"
+            + str(error)
+        )
+
+
+def shape_rtl(text):
+    return str(text)
 
 
 # =========================
-# TEXT HELPERS
+# TEXT WRAPPING
 # =========================
 
-def _clean_text(value):
-    if value is None:
-        return ""
+def measure_text_width(font, text):
+    try:
+        return font.getlength(
+            text,
+            direction="rtl",
+            language="ar"
+        )
+    except (TypeError, ValueError):
+        return font.getlength(text)
 
-    value = str(value)
-    value = value.replace("\r", " ").replace("\n", " ")
-    value = re.sub(r"\s+", " ", value).strip()
 
-    return value
+def wrap_rtl_text(text, font, max_width):
+    words = str(text).split()
 
+    if not words:
+        return [""]
 
-def _wrap_text(draw, text, font, max_width):
-    """
-    دابەشکردنی دەق بەپێی پانی پیکسڵ، بۆ ئەوەی نووسینەکان
-    لە دەرەوەی چوارچێوە نەچن.
-    """
-
-    text = _clean_text(text)
-
-    if not text:
-        return []
-
-    words = text.split(" ")
     lines = []
-    current = ""
+    current = words[0]
 
-    for word in words:
-        candidate = word if not current else current + " " + word
+    for word in words[1:]:
+        candidate = current + " " + word
 
-        if _text_width(draw, candidate, font) <= max_width:
+        if measure_text_width(font, candidate) <= max_width:
             current = candidate
         else:
-            if current:
-                lines.append(current)
+            lines.append(current)
+            current = word
 
-            if _text_width(draw, word, font) <= max_width:
-                current = word
-            else:
-                # وشەی زۆر درێژ بە پارچە دابەش دەکرێت
-                part = ""
-
-                for character in word:
-                    test = part + character
-
-                    if _text_width(draw, test, font) <= max_width:
-                        part = test
-                    else:
-                        if part:
-                            lines.append(part)
-                        part = character
-
-                current = part
-
-    if current:
-        lines.append(current)
-
+    lines.append(current)
     return lines
 
 
-def _draw_centered_text(
-    draw,
-    text,
-    y,
-    font,
-    fill,
-    max_width=None,
-    x_center=WIDTH // 2
-):
-    text = _clean_text(text)
-
-    if not text:
-        return y
-
-    if max_width is None:
-        max_width = WIDTH - 80
-
-    lines = _wrap_text(draw, text, font, max_width)
+def get_text_height(draw, lines, font, line_gap):
+    heights = []
 
     for line in lines:
-        width = _text_width(draw, line, font)
-        height = _text_height(draw, line, font)
+        try:
+            box = draw.textbbox(
+                (0, 0),
+                line,
+                font=font,
+                direction="rtl",
+                language="ar"
+            )
+        except (TypeError, ValueError):
+            box = draw.textbbox((0, 0), line, font=font)
 
-        x = x_center - width // 2
+        heights.append(max(1, box[3] - box[1]))
 
-        draw.text(
-            (x, y),
-            line,
-            font=font,
-            fill=fill,
-            direction="rtl"
-        )
+    total_height = sum(heights)
 
-        y += height + 10
+    if len(heights) > 1:
+        total_height += (len(heights) - 1) * line_gap
 
-    return y
+    return total_height, heights
 
 
-def _draw_centered_multiline(
+# =========================
+# AUTO-FIT RTL TEXT
+# =========================
+
+def draw_rtl_block(
     draw,
     text,
-    y,
-    font,
-    fill,
+    top,
     max_width,
-    line_gap=12
+    font_size,
+    fill,
+    max_lines=40,
+    line_gap=5,
+    max_height=None,
+    use_quran_font=False
 ):
-    text = _clean_text(text)
+    text = str(text).strip()
 
     if not text:
-        return y
+        return top
 
-    lines = _wrap_text(draw, text, font, max_width)
+    # Quran verses use quran.ttf.
+    # Tafsir uses rabartafsir.ttf.
+    if use_quran_font:
+        font_loader = make_quran_font
+    else:
+        font_loader = make_tafsir_font
 
-    for line in lines:
-        width = _text_width(draw, line, font)
-        height = _text_height(draw, line, font)
+    selected_font = None
+    selected_lines = None
+    selected_heights = None
+    selected_gap = line_gap
 
-        draw.text(
-            ((WIDTH - width) // 2, y),
-            line,
-            font=font,
-            fill=fill,
-            direction="rtl"
+    for size in range(font_size, 7, -1):
+        font = font_loader(size)
+
+        lines = wrap_rtl_text(text, font, max_width)
+
+        if len(lines) > max_lines:
+            continue
+
+        current_gap = min(line_gap, max(1, size // 8))
+
+        total_height, heights = get_text_height(
+            draw,
+            lines,
+            font,
+            current_gap
         )
 
-        y += height + line_gap
+        if max_height is not None and total_height > max_height:
+            continue
+
+        selected_font = font
+        selected_lines = lines
+        selected_heights = heights
+        selected_gap = current_gap
+        break
+
+    if selected_lines is None:
+        raise RuntimeError(
+            "دەقەکە زۆر درێژە بۆ چوارچێوەی وێنەکە. "
+            "بۆ پاراستنی تەواوی دەق، ڤیدیۆکە دروست نەکرا."
+        )
+
+    total_height = (
+        sum(selected_heights)
+        + max(0, len(selected_lines) - 1) * selected_gap
+    )
+
+    y = top
+
+    if max_height is not None:
+        y += max(0, (max_height - total_height) // 2)
+
+    for line, line_height in zip(selected_lines, selected_heights):
+        try:
+            draw.text(
+                (WIDTH // 2, y),
+                shape_rtl(line),
+                font=selected_font,
+                fill=fill,
+                anchor="mt",
+                direction="rtl",
+                language="ar"
+            )
+        except (TypeError, ValueError):
+            draw.text(
+                (WIDTH // 2, y),
+                shape_rtl(line),
+                font=selected_font,
+                fill=fill,
+                anchor="mt"
+            )
+
+        y += line_height + selected_gap
 
     return y
 
 
 # =========================
-# DESIGN HELPERS
+# ARABIC NAME NORMALIZATION
 # =========================
 
-def _get_design(design_id=1):
+def normalize_arabic_name(value):
+    value = str(value or "").strip()
+
+    value = unicodedata.normalize("NFD", value)
+
+    cleaned = []
+
+    for char in value:
+        category = unicodedata.category(char)
+
+        if category == "Mn":
+            continue
+
+        if char == "\u0640":
+            continue
+
+        if char.isspace():
+            continue
+
+        cleaned.append(char)
+
+    result = "".join(cleaned)
+
+    if result.startswith("سورة"):
+        result = result[len("سورة"):]
+
+    return result
+
+
+# =========================
+# DATABASE SCHEMA DETECTION
+# =========================
+
+def quote_identifier(name):
+    return '"' + str(name).replace('"', '""') + '"'
+
+
+def find_database_table(connection):
+    tables = connection.execute(
+        """
+        SELECT name
+        FROM sqlite_master
+        WHERE type = 'table'
+          AND name NOT LIKE 'sqlite_%'
+        """
+    ).fetchall()
+
+    required_columns = {
+        "text",
+        "asan",
+        "sura_name_ar",
+        "ayah"
+    }
+
+    possible_tables = []
+
+    for table_row in tables:
+        table_name = table_row[0]
+
+        columns_info = connection.execute(
+            "PRAGMA table_info("
+            + quote_identifier(table_name)
+            + ")"
+        ).fetchall()
+
+        columns = [row[1] for row in columns_info]
+
+        column_lookup = {
+            column.lower(): column
+            for column in columns
+        }
+
+        if required_columns.issubset(set(column_lookup.keys())):
+            possible_tables.append((table_name, column_lookup))
+
+    if not possible_tables:
+        raise RuntimeError(
+            "خشتەی Database نەدۆزرایەوە کە "
+            "خانەکانی text، asan، sura_name_ar، ayah "
+            "لەخۆ بگرێت."
+        )
+
+    best_table = None
+    best_lookup = None
+    best_count = -1
+
+    for table_name, column_lookup in possible_tables:
+        count = connection.execute(
+            "SELECT COUNT(*) FROM " + quote_identifier(table_name)
+        ).fetchone()[0]
+
+        if count > best_count:
+            best_table = table_name
+            best_lookup = column_lookup
+            best_count = count
+
+    print("Database table:", best_table, "| rows:", best_count)
+
+    return best_table, best_lookup
+
+
+# =========================
+# GET QURAN DATA FROM SQLITE
+# =========================
+
+def get_random_verses():
+    ensure_database()
+
+    connection = sqlite3.connect(DB_PATH)
+    connection.row_factory = sqlite3.Row
+
     try:
-        design_id = int(design_id)
-    except (TypeError, ValueError):
-        design_id = 1
+        table_name, column_lookup = find_database_table(connection)
 
-    return DESIGNS.get(design_id, DESIGNS[1])
+        query = "SELECT * FROM " + quote_identifier(table_name)
+
+        try:
+            rows = connection.execute(query + " ORDER BY rowid").fetchall()
+        except sqlite3.OperationalError:
+            rows = connection.execute(query).fetchall()
+
+        if not rows:
+            raise RuntimeError(
+                "Database ـەکە هیچ ئایەتێکی تێدا نییە."
+            )
+
+        text_column = column_lookup["text"]
+        tafsir_column = column_lookup["asan"]
+        name_column = column_lookup["sura_name_ar"]
+        ayah_column = column_lookup["ayah"]
+
+        surah_number_aliases = [
+            "sura", "sora", "surah",
+            "sura_id", "sora_id", "surah_id",
+            "sura_no", "sora_no", "surah_no",
+            "sura_number", "sora_number", "surah_number",
+            "sura_num", "sora_num"
+        ]
+
+        surah_number_column = None
+
+        for alias in surah_number_aliases:
+            if alias in column_lookup:
+                surah_number_column = column_lookup[alias]
+                break
+
+        numeric_surah_values = []
+
+        if surah_number_column:
+            for row in rows:
+                try:
+                    numeric_surah_values.append(
+                        int(row[surah_number_column])
+                    )
+                except (TypeError, ValueError):
+                    pass
+
+        zero_based_surah_numbers = (
+            bool(numeric_surah_values)
+            and min(numeric_surah_values) == 0
+            and max(numeric_surah_values) <= 113
+        )
+
+        surah_response = get_json(QURAN_API + "/surah")
+
+        if surah_response.get("code") != 200:
+            raise RuntimeError(
+                "نەتوانرا زانیاری سووڕەتەکان وەربگیرێت."
+            )
+
+        api_surahs = surah_response["data"]
+
+        api_name_to_number = {}
+
+        for surah in api_surahs:
+            normalized_name = normalize_arabic_name(surah["name"])
+            api_name_to_number[normalized_name] = int(surah["number"])
+
+        name_order = []
+
+        for row in rows:
+            name = str(row[name_column] or "").strip()
+
+            if name and name not in name_order:
+                name_order.append(name)
+
+        ordered_name_to_number = {}
+
+        for index, name in enumerate(name_order, start=1):
+            if index <= 114:
+                ordered_name_to_number[name] = index
+
+        api_surah_counts = {
+            int(surah["number"]): int(surah["numberOfAyahs"])
+            for surah in api_surahs
+        }
+
+        global_start = {}
+        running_total = 0
+
+        for surah_number in range(1, 115):
+            global_start[surah_number] = running_total
+            running_total += api_surah_counts.get(surah_number, 0)
+
+        grouped = {}
+
+        for row in rows:
+            try:
+                ayah_number = int(row[ayah_column])
+            except (TypeError, ValueError):
+                continue
+
+            if ayah_number < 1:
+                continue
+
+            surah_name = str(row[name_column] or "").strip()
+
+            if not surah_name:
+                continue
+
+            surah_number = None
+
+            if surah_number_column:
+                try:
+                    raw_number = int(row[surah_number_column])
+
+                    if zero_based_surah_numbers:
+                        raw_number += 1
+
+                    if 1 <= raw_number <= 114:
+                        surah_number = raw_number
+
+                except (TypeError, ValueError):
+                    pass
+
+            if surah_number is None:
+                normalized_name = normalize_arabic_name(surah_name)
+                surah_number = api_name_to_number.get(normalized_name)
+
+            if surah_number is None:
+                surah_number = ordered_name_to_number.get(surah_name)
+
+            if not surah_number:
+                continue
+
+            arabic_text = str(row[text_column] or "").strip()
+            tafsir_text = str(row[tafsir_column] or "").strip()
+
+            if not arabic_text or not tafsir_text:
+                continue
+
+            item = {
+                "surah_number": surah_number,
+                "surah_name": surah_name,
+                "ayah_number": ayah_number,
+                "global_number": global_start[surah_number] + ayah_number,
+                "arabic": arabic_text,
+                "tafsir": tafsir_text
+            }
+
+            grouped.setdefault(surah_number, []).append(item)
+
+        candidates = []
+
+        for surah_number, ayahs in grouped.items():
+            ayahs.sort(key=lambda item: item["ayah_number"])
+
+            for start in range(0, len(ayahs) - AYAH_COUNT + 1):
+                window = ayahs[start:start + AYAH_COUNT]
+
+                expected_numbers = list(
+                    range(
+                        window[0]["ayah_number"],
+                        window[0]["ayah_number"] + AYAH_COUNT
+                    )
+                )
+
+                actual_numbers = [
+                    item["ayah_number"] for item in window
+                ]
+
+                if actual_numbers != expected_numbers:
+                    continue
+
+                if not all(item["arabic"] and item["tafsir"] for item in window):
+                    continue
+
+                candidates.append(window)
+
+        if not candidates:
+            raise RuntimeError(
+                "هیچ کۆمەڵەیەکی ١٠ ئایەتی بەردەوام "
+                "لەگەڵ تەفسیری ئاسان لە Database نەدۆزرایەوە."
+            )
+
+        selected = random.choice(candidates)
+
+        print(
+            "Selected surah:",
+            selected[0]["surah_name"],
+            "| ayahs:",
+            selected[0]["ayah_number"],
+            "-",
+            selected[-1]["ayah_number"]
+        )
+
+        return selected
+
+    finally:
+        connection.close()
 
 
-def _draw_background(image, draw, palette):
-    image.paste(palette["background"], (0, 0, WIDTH, HEIGHT))
+# =========================
+# CREATE PREMIUM VERSE IMAGE
+# =========================
 
-    # چوارچێوەی دەرەوە
+def create_ayah_image(ayah, index, image_path):
+    image = Image.new("RGB", (WIDTH, HEIGHT), (8, 26, 31))
+    draw = ImageDraw.Draw(image)
+
+    # Dark emerald gradient
+    for y in range(HEIGHT):
+        ratio = y / HEIGHT
+
+        color = (
+            int(7 + 7 * ratio),
+            int(29 + 19 * ratio),
+            int(34 + 13 * ratio)
+        )
+
+        draw.line((0, y, WIDTH, y), fill=color)
+
+    gold = (218, 185, 111)
+    soft_gold = (151, 127, 76)
+    white = (250, 247, 235)
+    muted_white = (206, 220, 213)
+    panel = (16, 43, 47)
+
+    # Outer frame
     draw.rounded_rectangle(
-        (22, 22, WIDTH - 22, HEIGHT - 22),
-        radius=28,
-        outline=palette["border"],
+        (19, 19, WIDTH - 19, HEIGHT - 19),
+        radius=32,
+        outline=gold,
         width=3
     )
 
-    # چوارچێوەی ناوەوە
     draw.rounded_rectangle(
-        (35, 35, WIDTH - 35, HEIGHT - 35),
-        radius=23,
-        outline=palette["primary"],
+        (31, 31, WIDTH - 31, HEIGHT - 31),
+        radius=27,
+        outline=(65, 104, 91),
         width=1
     )
 
+    # Decorative corners
+    corner_size = 42
+    margin = 42
 
-def _draw_header(draw, palette):
-    title_font = _tafsir_font(34)
-    subtitle_font = _tafsir_font(22)
+    corners = [
+        (margin, margin, 1, 1),
+        (WIDTH - margin, margin, -1, 1),
+        (margin, HEIGHT - margin, 1, -1),
+        (WIDTH - margin, HEIGHT - margin, -1, -1)
+    ]
 
-    _draw_centered_text(
-        draw,
-        "قورئانی پیرۆز",
-        65,
-        title_font,
-        palette["primary"],
-        max_width=WIDTH - 100
-    )
+    for x, y, dx, dy in corners:
+        draw.line(
+            (x, y, x + dx * corner_size, y),
+            fill=gold,
+            width=2
+        )
 
-    _draw_centered_text(
-        draw,
-        "ڕێگای ئیسلام",
-        112,
-        subtitle_font,
-        palette["muted"],
-        max_width=WIDTH - 100
-    )
+        draw.line(
+            (x, y, x, y + dy * corner_size),
+            fill=gold,
+            width=2
+        )
 
+        draw.ellipse(
+            (x - 4, y - 4, x + 4, y + 4),
+            fill=gold
+        )
+
+    # Header separator
     draw.line(
-        (115, 160, WIDTH - 115, 160),
-        fill=palette["border"],
+        (155, 77, WIDTH - 155, 77),
+        fill=soft_gold,
+        width=1
+    )
+
+    # Decorative diamond
+    cx = WIDTH // 2
+    cy = 77
+
+    draw.polygon(
+        [
+            (cx, cy - 7),
+            (cx + 7, cy),
+            (cx, cy + 7),
+            (cx - 7, cy)
+        ],
+        fill=gold
+    )
+
+    # Surah name: Kurdish/system font
+    draw.text(
+        (WIDTH // 2, 112),
+        shape_rtl(ayah["surah_name"]),
+        font=make_font(29),
+        fill=gold,
+        anchor="mm",
+        direction="rtl",
+        language="ar"
+    )
+
+    # Ayah number: Kurdish/system font
+    draw.text(
+        (WIDTH // 2, 155),
+        shape_rtl("ئایەتی " + str(ayah["ayah_number"])),
+        font=make_font(23),
+        fill=muted_white,
+        anchor="mm",
+        direction="rtl",
+        language="ar"
+    )
+
+    # Header divider
+    draw.line(
+        (245, 184, WIDTH - 245, 184),
+        fill=(72, 112, 94),
+        width=1
+    )
+
+    draw.ellipse(
+        (WIDTH // 2 - 4, 180, WIDTH // 2 + 4, 188),
+        fill=gold
+    )
+
+    # Quran verse panel
+    draw.rounded_rectangle(
+        (43, 205, WIDTH - 43, 600),
+        radius=27,
+        fill=(9, 32, 37),
+        outline=gold,
         width=2
     )
-
-
-def _draw_footer(draw, palette):
-    # ناونیشانی خوارەوە بە قەبارەی گەورەتر
-    footer_font = _tafsir_font(29)
-
-    draw.line(
-        (100, HEIGHT - 108, WIDTH - 100, HEIGHT - 108),
-        fill=palette["border"],
-        width=2
-    )
-
-    _draw_centered_text(
-        draw,
-        "قورئانی پیرۆز - ڕێگای ئیسلام",
-        HEIGHT - 88,
-        footer_font,
-        palette["primary"],
-        max_width=WIDTH - 100
-    )
-
-
-# =========================
-# AYAH IMAGE LAYOUT
-# =========================
-
-def _draw_ayah_number(draw, number, y, palette):
-    number_font = _tafsir_font(24)
-    label = f"﴿ {number} ﴾"
-
-    _draw_centered_text(
-        draw,
-        label,
-        y,
-        number_font,
-        palette["secondary"],
-        max_width=WIDTH - 100
-    )
-
-
-def _draw_tafsir_panel(
-    draw,
-    tafsir,
-    top,
-    bottom,
-    palette
-):
-    """
-    تەفسیر لە ناو پانێڵێکی ڕێکخراودا دەنووسێت.
-    فۆنتی تەفسیر گەورەتر کراوە.
-    """
-
-    left = 62
-    right = WIDTH - 62
 
     draw.rounded_rectangle(
-        (left, top, right, bottom),
+        (53, 215, WIDTH - 53, 590),
         radius=22,
-        fill=palette["panel"],
-        outline=palette["border"],
+        outline=(53, 91, 79),
+        width=1
+    )
+
+    # Decorative markers
+    for marker_y in (230, 575):
+        draw.ellipse(
+            (
+                WIDTH // 2 - 4,
+                marker_y - 4,
+                WIDTH // 2 + 4,
+                marker_y + 4
+            ),
+            fill=gold
+        )
+
+    # Arabic Quran text: quran.ttf ONLY
+    draw_rtl_block(
+        draw,
+        ayah["arabic"],
+        240,
+        WIDTH - 120,
+        39,
+        white,
+        max_lines=30,
+        line_gap=5,
+        max_height=325,
+        use_quran_font=True
+    )
+
+    # Tafsir panel
+    draw.rounded_rectangle(
+        (43, 620, WIDTH - 43, 1095),
+        radius=27,
+        fill=panel,
+        outline=(109, 139, 104),
         width=2
     )
 
-    heading_font = _tafsir_font(31)
-    body_font = _tafsir_font(34)
-
-    heading = "تەفسیری ئایەت"
-
-    heading_height = _text_height(
-        draw,
-        heading,
-        heading_font
+    draw.rounded_rectangle(
+        (53, 630, WIDTH - 53, 1085),
+        radius=21,
+        outline=(48, 82, 72),
+        width=1
     )
 
-    heading_width = _text_width(
-        draw,
-        heading,
-        heading_font
+    # Tafsir heading plaque: rabartafsir.ttf
+    draw.rounded_rectangle(
+        (175, 640, WIDTH - 175, 687),
+        radius=20,
+        fill=(34, 67, 59),
+        outline=soft_gold,
+        width=1
     )
 
     draw.text(
-        ((WIDTH - heading_width) // 2, top + 22),
-        heading,
-        font=heading_font,
-        fill=palette["primary"],
-        direction="rtl"
+        (WIDTH // 2, 663),
+        shape_rtl("تەفسیری ئاسان"),
+        font=make_tafsir_font(27),
+        fill=gold,
+        anchor="mm",
+        direction="rtl",
+        language="ar"
     )
 
-    line_y = top + heading_height + 42
+    # Decorative side markers
+    for x in (157, WIDTH - 157):
+        draw.ellipse(
+            (x - 3, 660, x + 3, 666),
+            fill=gold
+        )
 
+    # Tafsir body: rabartafsir.ttf
+    draw_rtl_block(
+        draw,
+        ayah["tafsir"],
+        700,
+        WIDTH - 120,
+        28,
+        white,
+        max_lines=45,
+        line_gap=4,
+        max_height=370,
+        use_quran_font=False
+    )
+
+    # Footer separator
     draw.line(
-        (left + 45, line_y, right - 45, line_y),
-        fill=palette["border"],
+        (95, 1120, WIDTH - 95, 1120),
+        fill=soft_gold,
         width=1
     )
 
-    tafsir = _clean_text(tafsir)
-
-    if not tafsir:
-        tafsir = "تەفسیر بۆ ئەم ئایەتە بەردەست نییە."
-
-    text_top = line_y + 22
-    max_width = right - left - 48
-    lines = _wrap_text(
-        draw,
-        tafsir,
-        body_font,
-        max_width
+    draw.polygon(
+        [
+            (WIDTH // 2, 1113),
+            (WIDTH // 2 + 7, 1120),
+            (WIDTH // 2, 1127),
+            (WIDTH // 2 - 7, 1120)
+        ],
+        fill=gold
     )
 
-    available_height = bottom - text_top - 20
-
-    # ژمارەی هێڵەکان بەپێی بەرزی بەردەست سنووردار دەکرێت
-    line_height = _text_height(
-        draw,
-        "ئ",
-        body_font
-    ) + 14
-
-    max_lines = max(1, available_height // line_height)
-
-    if len(lines) > max_lines:
-        lines = lines[:max_lines]
-
-        if lines:
-            last = lines[-1]
-
-            while last and _text_width(
-                draw,
-                last + "...",
-                body_font
-            ) > max_width:
-                last = last[:-1]
-
-            lines[-1] = last.rstrip() + "..."
-
-    y = text_top
-
-    for line in lines:
-        width = _text_width(draw, line, body_font)
-        height = _text_height(draw, line, body_font)
-
-        draw.text(
-            ((WIDTH - width) // 2, y),
-            line,
-            font=body_font,
-            fill=palette["text"],
-            direction="rtl"
-        )
-
-        y += height + 14
-
-
-def _draw_ayah_panel(
-    draw,
-    ayah_text,
-    top,
-    bottom,
-    palette
-):
-    left = 54
-    right = WIDTH - 54
-
-    draw.rounded_rectangle(
-        (left, top, right, bottom),
-        radius=24,
-        fill=palette["panel"],
-        outline=palette["border"],
-        width=2
+    # Brand footer: rabartafsir.ttf
+    draw.text(
+        (WIDTH // 2, 1160),
+        shape_rtl("قورئانی پیرۆز - ڕێگای ئیسلام"),
+        font=make_tafsir_font(23),
+        fill=gold,
+        anchor="mm",
+        direction="rtl",
+        language="ar"
     )
 
-    quran_font = _quran_font(43)
-    max_width = right - left - 48
-
-    ayah_text = _clean_text(ayah_text)
-
-    lines = _wrap_text(
-        draw,
-        ayah_text,
-        quran_font,
-        max_width
+    draw.line(
+        (220, 1190, WIDTH - 220, 1190),
+        fill=(65, 101, 85),
+        width=1
     )
 
-    available_height = bottom - top - 45
-
-    line_height = _text_height(
-        draw,
-        "الله",
-        quran_font
-    ) + 17
-
-    max_lines = max(1, available_height // line_height)
-
-    if len(lines) > max_lines:
-        # ئەگەر دەقەکە زۆر درێژ بێت، قەبارەی فۆنت کەم دەکەین
-        quran_font = _quran_font(35)
-
-        lines = _wrap_text(
-            draw,
-            ayah_text,
-            quran_font,
-            max_width
-        )
-
-        line_height = _text_height(
-            draw,
-            "الله",
-            quran_font
-        ) + 13
-
-    total_height = len(lines) * line_height
-    y = top + max(20, (bottom - top - total_height) // 2)
-
-    for line in lines:
-        width = _text_width(draw, line, quran_font)
-        height = _text_height(draw, line, quran_font)
-
-        draw.text(
-            ((WIDTH - width) // 2, y),
-            line,
-            font=quran_font,
-            fill=palette["text"],
-            direction="rtl"
-        )
-
-        y += height + 13
+    image.save(image_path)
 
 
 # =========================
-# CREATE AYAH IMAGE
+# DOWNLOAD RECITATION AUDIO
 # =========================
 
-def create_ayah_image(
-    ayah,
-    index,
-    output_path,
-    design_id=1
-):
-    """
-    وێنەی ئایەتێک دروست دەکات.
-
-    ayah:
-        دەتوانێت dict بێت و ستوونەکانی text, asan, ayah, sura_name_ar
-        لەخۆ بگرێت.
-
-    index:
-        ژمارەی ڕیزبەندی ئایەت لە ڤیدیۆکەدا.
-
-    output_path:
-        شوێنی پاشەکەوتکردنی PNG.
-
-    design_id:
-        1 سەوز/زێڕین
-        2 ڕەش/زێڕین
-        3 شینی ئاسمانی
-        4 کرێمی/کلاسیک
-        5 مۆر/لاڤەندەر
-    """
-
-    palette = _get_design(design_id)
-
-    os.makedirs(
-        os.path.dirname(os.path.abspath(output_path)),
-        exist_ok=True
+def download_ayah_audio(ayah, audio_path):
+    url = (
+        QURAN_API
+        + "/ayah/"
+        + str(ayah["global_number"])
+        + "/ar.alafasy"
     )
 
-    image = Image.new(
-        "RGB",
-        (WIDTH, HEIGHT),
-        palette["background"]
-    )
+    response = get_json(url)
 
-    draw = ImageDraw.Draw(image)
-
-    _draw_background(image, draw, palette)
-    _draw_header(draw, palette)
-
-    ayah_text = _clean_text(
-        ayah.get("text", "")
-    )
-
-    tafsir = _clean_text(
-        ayah.get("asan", "")
-    )
-
-    ayah_number = ayah.get("ayah", index + 1)
-
-    surah_name = _clean_text(
-        ayah.get("sura_name_ar", "")
-    )
-
-    # ناوی سورەت
-    if surah_name:
-        surah_font = _tafsir_font(24)
-
-        _draw_centered_text(
-            draw,
-            surah_name,
-            180,
-            surah_font,
-            palette["secondary"],
-            max_width=WIDTH - 100
+    if response.get("code") != 200:
+        raise RuntimeError(
+            "نەتوانرا دەنگی ئایەتی "
+            + str(ayah["ayah_number"])
+            + " وەربگیرێت."
         )
 
-        ayah_top = 230
-    else:
-        ayah_top = 205
+    audio_url = response.get("data", {}).get("audio")
 
-    ayah_bottom = 620
-
-    _draw_ayah_panel(
-        draw,
-        ayah_text,
-        ayah_top,
-        ayah_bottom,
-        palette
-    )
-
-    _draw_ayah_number(
-        draw,
-        ayah_number,
-        640,
-        palette
-    )
-
-    tafsir_top = 700
-    tafsir_bottom = HEIGHT - 145
-
-    _draw_tafsir_panel(
-        draw,
-        tafsir,
-        tafsir_top,
-        tafsir_bottom,
-        palette
-    )
-
-    _draw_footer(draw, palette)
-
-    image.save(
-        output_path,
-        format="PNG",
-        optimize=True
-    )
-
-    return output_path
-
-
-# =========================
-# OPTIONAL PREVIEW / TEST
-# =========================
-
-def create_preview(
-    output_path,
-    design_id=1,
-    ayah_text="بِسْمِ اللَّهِ الرَّحْمَٰنِ الرَّحِيمِ",
-    tafsir_text="بە ناوی خوای بەخشندە و میهرەبان.",
-    ayah_number=1,
-    surah_name="سورة الفاتحة"
-):
-    """
-    دروستکردنی وێنەیەکی تاقیکردنەوە بۆ هەر یەکێک لە ٥ دیزاینەکە.
-    ئەم فەنکشنە بۆ تاقیکردنەوەی دیزاینەکەیە، نەک بۆ دروستکردنی
-    ڤیدیۆی سەرەکی.
-    """
-
-    sample_ayah = {
-        "text": ayah_text,
-        "asan": tafsir_text,
-        "ayah": ayah_number,
-        "sura_name_ar": surah_name
-    }
-
-    return create_ayah_image(
-        sample_ayah,
-        0,
-        output_path,
-        design_id=design_id
-    )
-
-
-def create_all_design_previews(output_dir):
-    """
-    ٥ وێنەی جیاواز دروست دەکات بۆ بینینی دیزاینەکان.
-    """
-
-    os.makedirs(output_dir, exist_ok=True)
-
-    results = []
-
-    for design_id in range(1, 6):
-        output_path = os.path.join(
-            output_dir,
-            f"design_{design_id}.png"
+    if not audio_url:
+        raise RuntimeError(
+            "بەستەری دەنگی ئایەت نەدۆزرایەوە."
         )
 
-        create_preview(
-            output_path,
-            design_id=design_id
+    download_file(audio_url, audio_path)
+
+
+# =========================
+# BUILD VIDEO
+# =========================
+
+def create_video():
+    os.makedirs(WORK_DIR, exist_ok=True)
+
+    selected_ayahs = get_random_verses()
+    clip_files = []
+
+    for index, ayah in enumerate(selected_ayahs, start=1):
+        print("Preparing ayah", index, "of", AYAH_COUNT)
+
+        image_path = os.path.join(
+            WORK_DIR, "ayah_" + str(index) + ".png"
         )
 
-        results.append(output_path)
+        audio_path = os.path.join(
+            WORK_DIR, "ayah_" + str(index) + ".mp3"
+        )
 
-    return results
+        clip_path = os.path.join(
+            WORK_DIR, "clip_" + str(index) + ".mp4"
+        )
+
+        create_ayah_image(ayah, index, image_path)
+        download_ayah_audio(ayah, audio_path)
+
+        run_command([
+            "ffmpeg", "-y",
+            "-loop", "1",
+            "-framerate", "24",
+            "-i", image_path,
+            "-i", audio_path,
+            "-vf", "scale=720:1280,format=yuv420p",
+            "-c:v", "libx264",
+            "-preset", "veryfast",
+            "-crf", "27",
+            "-tune", "stillimage",
+            "-c:a", "aac",
+            "-b:a", "128k",
+            "-shortest",
+            "-movflags", "+faststart",
+            clip_path
+        ])
+
+        clip_files.append(clip_path)
+
+    concat_path = os.path.join(WORK_DIR, "clips.txt")
+
+    with open(concat_path, "w", encoding="utf-8") as file:
+        for clip_path in clip_files:
+            safe_path = os.path.abspath(clip_path).replace("\\", "/")
+            file.write("file '" + safe_path + "'\n")
+
+    run_command([
+        "ffmpeg", "-y",
+        "-f", "concat",
+        "-safe", "0",
+        "-i", concat_path,
+        "-c:v", "libx264",
+        "-preset", "veryfast",
+        "-crf", "27",
+        "-pix_fmt", "yuv420p",
+        "-c:a", "aac",
+        "-b:a", "128k",
+        "-movflags", "+faststart",
+        OUTPUT_VIDEO
+    ])
+
+    if (
+        not os.path.exists(OUTPUT_VIDEO)
+        or os.path.getsize(OUTPUT_VIDEO) < 10000
+    ):
+        raise RuntimeError(
+            "ڤیدیۆکە دروست نەبوو یان قەبارەکەی زۆر بچووکە."
+        )
+
+    with open(
+        os.path.join(WORK_DIR, "selected_ayahs.json"),
+        "w",
+        encoding="utf-8"
+    ) as file:
+        json.dump(
+            selected_ayahs,
+            file,
+            ensure_ascii=False,
+            indent=2
+        )
+
+    return selected_ayahs
 
 
 # =========================
-# MODULE EXPORTS
+# SEND VIDEO TO TELEGRAM
 # =========================
 
-__all__ = [
-    "DESIGNS",
-    "create_ayah_image",
-    "create_preview",
-    "create_all_design_previews",
-]
+def send_video(ayahs):
+    caption = (
+        "📖 " + ayahs[0]["surah_name"] + "\n"
+        + "ئایەتەکان: "
+        + str(ayahs[0]["ayah_number"])
+        + "–"
+        + str(ayahs[-1]["ayah_number"])
+        + "\n"
+        + "تەفسیری ئاسان - ڕێگای ئیسلام"
+    )
+
+    boundary = "----QuranVideoBoundary7MA4YWxkTrZu0gW"
+
+    def field_part(name, value):
+        return (
+            ("--" + boundary + "\r\n").encode("utf-8")
+            + (
+                'Content-Disposition: form-data; name="'
+                + name
+                + '"\r\n\r\n'
+            ).encode("utf-8")
+            + value.encode("utf-8")
+            + b"\r\n"
+        )
+
+    body = field_part("chat_id", CHANNEL)
+    body += field_part("caption", caption)
+    body += field_part("supports_streaming", "true")
+
+    body += ("--" + boundary + "\r\n").encode("utf-8")
+    body += (
+        b'Content-Disposition: form-data; name="video"; '
+        b'filename="quran_nightly.mp4"\r\n'
+    )
+    body += b"Content-Type: video/mp4\r\n\r\n"
+
+    with open(OUTPUT_VIDEO, "rb") as file:
+        body += file.read()
+
+    body += ("\r\n--" + boundary + "--\r\n").encode("utf-8")
+
+    request = urllib.request.Request(
+        "https://api.telegram.org/bot" + TOKEN + "/sendVideo",
+        data=body,
+        headers={
+            "Content-Type": (
+                "multipart/form-data; boundary=" + boundary
+            ),
+            "User-Agent": "QuranNightlyVideo/4.0"
+        },
+        method="POST"
+    )
+
+    try:
+        with urllib.request.urlopen(request, timeout=240) as response:
+            result = json.loads(response.read().decode("utf-8"))
+
+    except urllib.error.HTTPError as error:
+        details = error.read().decode("utf-8", errors="replace")
+        raise RuntimeError(
+            "Telegram video upload failed: " + details
+        )
+
+    if not result.get("ok"):
+        raise RuntimeError(
+            "Telegram نەیتوانی ڤیدیۆکە بنێرێت: " + str(result)
+        )
+
+    print("Quran video sent successfully.")
+
+
+# =========================
+# MAIN
+# =========================
+
+def main():
+    if not shutil.which("ffmpeg"):
+        raise RuntimeError("FFmpeg دامەزراو نییە.")
+
+    # Check both custom fonts before starting
+    if not os.path.isfile(QURAN_FONT_PATH):
+        raise RuntimeError(
+            "quran.ttf لە هەمان شوێنی quran_video.py نەدۆزرایەوە."
+        )
+
+    if not os.path.isfile(TAFSIR_FONT_PATH):
+        raise RuntimeError(
+            "rabartafsir.ttf لە هەمان شوێنی quran_video.py "
+            "نەدۆزرایەوە."
+        )
+
+    print("Starting Quran tafsir video...")
+
+    selected_ayahs = create_video()
+
+    print("Video created. Uploading to Telegram...")
+
+    send_video(selected_ayahs)
+
+    print("Finished successfully.")
+
+
+if __name__ == "__main__":
+    main()
