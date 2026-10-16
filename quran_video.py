@@ -698,27 +698,29 @@ def get_random_verses():
 # CREATE PREMIUM VERSE IMAGE
 # =========================
 
-def create_ayah_image(ayah, index, image_path):
-    image = Image.new("RGB", (WIDTH, HEIGHT), (8, 26, 31))
+def create_ayah_image(ayah, index, image_path, design=1):
+    # Five user-selectable palettes; layout and Quran text remain the same.
+    palettes = {
+        1: {"name": "زمردی و زێڕین", "top": (7, 29, 34), "bottom": (14, 48, 47), "gold": (218, 185, 111), "soft": (151, 127, 76), "white": (250, 247, 235), "muted": (206, 220, 213), "panel": (16, 43, 47), "edge": (65, 104, 91)},
+        2: {"name": "شەوی شین", "top": (8, 20, 48), "bottom": (23, 45, 83), "gold": (232, 198, 121), "soft": (156, 145, 110), "white": (250, 249, 245), "muted": (205, 220, 241), "panel": (17, 35, 66), "edge": (73, 104, 157)},
+        3: {"name": "مۆر و زێڕ", "top": (31, 16, 43), "bottom": (62, 30, 67), "gold": (235, 194, 126), "soft": (159, 122, 100), "white": (255, 247, 244), "muted": (226, 207, 230), "panel": (43, 24, 53), "edge": (112, 75, 124)},
+        4: {"name": "خاکی و کرێمی", "top": (48, 34, 24), "bottom": (83, 61, 41), "gold": (244, 211, 151), "soft": (174, 137, 93), "white": (255, 248, 232), "muted": (231, 215, 188), "panel": (57, 42, 31), "edge": (139, 105, 72)},
+        5: {"name": "ڕەش و سپی", "top": (15, 18, 22), "bottom": (38, 42, 47), "gold": (224, 226, 229), "soft": (142, 148, 155), "white": (255, 255, 255), "muted": (216, 220, 224), "panel": (25, 29, 34), "edge": (96, 103, 112)},
+    }
+    palette = palettes.get(int(design or 1), palettes[1])
+    image = Image.new("RGB", (WIDTH, HEIGHT), palette["top"])
     draw = ImageDraw.Draw(image)
 
-    # Dark emerald gradient
     for y in range(HEIGHT):
         ratio = y / HEIGHT
-
-        color = (
-            int(7 + 7 * ratio),
-            int(29 + 19 * ratio),
-            int(34 + 13 * ratio)
-        )
-
+        color = tuple(int(a + (b - a) * ratio) for a, b in zip(palette["top"], palette["bottom"]))
         draw.line((0, y, WIDTH, y), fill=color)
 
-    gold = (218, 185, 111)
-    soft_gold = (151, 127, 76)
-    white = (250, 247, 235)
-    muted_white = (206, 220, 213)
-    panel = (16, 43, 47)
+    gold = palette["gold"]
+    soft_gold = palette["soft"]
+    white = palette["white"]
+    muted_white = palette["muted"]
+    panel = palette["panel"]
 
     # Outer frame
     draw.rounded_rectangle(
@@ -731,7 +733,7 @@ def create_ayah_image(ayah, index, image_path):
     draw.rounded_rectangle(
         (31, 31, WIDTH - 31, HEIGHT - 31),
         radius=27,
-        outline=(65, 104, 91),
+        outline=palette["edge"],
         width=1
     )
 
@@ -823,7 +825,7 @@ def create_ayah_image(ayah, index, image_path):
     draw.rounded_rectangle(
         (43, 205, WIDTH - 43, 600),
         radius=27,
-        fill=(9, 32, 37),
+        fill=tuple(max(0, c - 7) for c in palette["top"]),
         outline=gold,
         width=2
     )
@@ -831,7 +833,7 @@ def create_ayah_image(ayah, index, image_path):
     draw.rounded_rectangle(
         (53, 215, WIDTH - 53, 590),
         radius=22,
-        outline=(53, 91, 79),
+        outline=palette["edge"],
         width=1
     )
 
@@ -866,14 +868,14 @@ def create_ayah_image(ayah, index, image_path):
         (43, 620, WIDTH - 43, 1095),
         radius=27,
         fill=panel,
-        outline=(109, 139, 104),
+        outline=palette["edge"],
         width=2
     )
 
     draw.rounded_rectangle(
         (53, 630, WIDTH - 53, 1085),
         radius=21,
-        outline=(48, 82, 72),
+        outline=palette["edge"],
         width=1
     )
 
@@ -881,7 +883,7 @@ def create_ayah_image(ayah, index, image_path):
     draw.rounded_rectangle(
         (175, 640, WIDTH - 175, 687),
         radius=20,
-        fill=(34, 67, 59),
+        fill=tuple(min(255, c + 12) for c in panel),
         outline=soft_gold,
         width=1
     )
@@ -909,7 +911,7 @@ def create_ayah_image(ayah, index, image_path):
         ayah["tafsir"],
         700,
         WIDTH - 120,
-        28,
+        32,
         white,
         max_lines=45,
         line_gap=4,
