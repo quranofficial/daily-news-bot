@@ -1006,7 +1006,7 @@ def run_ffmpeg(args):
         )
 
 
-def build_video(chat_id, ayahs, reciter_id):
+def build_video(chat_id, ayahs, reciter_id, design=1):
     stamp = str(int(time.time()))
 
     job_dir = os.path.join(
@@ -1096,6 +1096,7 @@ def build_video(chat_id, ayahs, reciter_id):
                 ayah,
                 i,
                 image_path,
+                design=design,
             )
 
             run_ffmpeg([
@@ -1168,6 +1169,50 @@ def build_video(chat_id, ayahs, reciter_id):
         log_exception("VIDEO JOB FAILED", exc)
         shutil.rmtree(job_dir, ignore_errors=True)
         raise
+
+
+def keyboard_designs():
+    names = [
+        ("🌿 ١. زمردی و زێڕین", 1),
+        ("🌌 ٢. شەوی شین", 2),
+        ("💜 ٣. مۆر و زێڕ", 3),
+        ("🏜️ ٤. خاکی و کرێمی", 4),
+        ("⚫ ٥. ڕەش و سپی", 5),
+    ]
+    return {"inline_keyboard": [
+        [{"text": name, "callback_data": "design:%d" % number}]
+        for name, number in names
+    ]}
+
+
+def create_selected_video(chat_id, design):
+    session = SESSIONS.get(chat_id)
+    if not session or session.get("state") != "design":
+        send_message(chat_id, "داواکارییەکەت بەسەرچووە؛ /start بنووسە.")
+        return
+    job_dir = None
+    try:
+        surah_number = int(session["surah_number"])
+        start_ayah = int(session["start_ayah"])
+        end_ayah = int(session["end_ayah"])
+        reciter_id = str(session["reciter_id"])
+        ayahs = find_surah_rows(surah_number, start_ayah, end_ayah)
+        surah = next(s for s in get_surahs() if int(s["number"]) == surah_number)
+        reciter_name = RECITERS[reciter_id]["name"]
+        send_message(chat_id, "⏳ ڤیدیۆکەت دروست دەکەم...\n🎙️ قاری: %s\nسوورەت: %s\nئایەتەکان: %d–%d\n🎨 دیزاین: %d/5\nتکایە چاوەڕێ بکە." % (reciter_name, surah["name"], start_ayah, end_ayah, design))
+        video_path, job_dir = build_video(chat_id, ayahs, reciter_id, design=design)
+        send_video(chat_id, video_path, "قورئانی پیرۆز — %s\nقاری: %s\nئایەت %d–%d" % (surah["name"], reciter_name, start_ayah, end_ayah))
+        send_message(chat_id, "✅ ڤیدیۆکە بە سەرکەوتوویی بۆ تۆ نێردرا.")
+    except Exception as exc:
+        log_exception("VIDEO CREATION ERROR | chat_id=%s" % chat_id, exc)
+        try:
+            send_message(chat_id, "❌ نەمتوانی ڤیدیۆکە دروست بکەم.\n" + str(exc))
+        except Exception as send_exc:
+            log_exception("Could not send error to Telegram", send_exc)
+    finally:
+        SESSIONS.pop(chat_id, None)
+        if job_dir:
+            shutil.rmtree(job_dir, ignore_errors=True)
 
 
 # =========================
@@ -1280,103 +1325,18 @@ def handle_message(message):
         return
 
     if session.get("state") == "end_ayah":
-        job_dir = None
-
         try:
             end_ayah = int(text)
-            surah_number = session["surah_number"]
-            start_ayah = session["start_ayah"]
-            reciter_id = session["reciter_id"]
-
-            log_error(
-                "VIDEO REQUEST | chat_id=%s | reciter=%s | "
-                "surah=%s | ayahs=%s-%s"
-                % (
-                    chat_id,
-                    reciter_id,
-                    surah_number,
-                    start_ayah,
-                    end_ayah,
-                )
-            )
-
-            ayahs = find_surah_rows(
-                surah_number,
-                start_ayah,
-                end_ayah,
-            )
-
-            surah = next(
-                s for s in get_surahs()
-                if int(s["number"]) == surah_number
-            )
-
-            reciter_name = RECITERS[str(reciter_id)]["name"]
-
-            send_message(
-                chat_id,
-                "⏳ ڤیدیۆکەت دروست دەکەم...\n"
-                "🎙️ قاری: %s\n"
-                "سوورەت: %s\n"
-                "ئایەتەکان: %d–%d\n"
-                "تکایە چاوەڕێ بکە."
-                % (
-                    reciter_name,
-                    surah["name"],
-                    start_ayah,
-                    end_ayah,
-                ),
-            )
-
-            video_path, job_dir = build_video(
-                chat_id,
-                ayahs,
-                reciter_id,
-            )
-
-            send_video(
-                chat_id,
-                video_path,
-                "قورئانی پیرۆز — %s\n"
-                "قاری: %s\n"
-                "ئایەت %d–%d"
-                % (
-                    surah["name"],
-                    reciter_name,
-                    start_ayah,
-                    end_ayah,
-                ),
-            )
-
-            send_message(
-                chat_id,
-                "✅ ڤیدیۆکە بە سەرکەوتوویی بۆ تۆ نێردرا.",
-            )
-
+            surah_number = int(session["surah_number"])
+            start_ayah = int(session["start_ayah"])
+            surah = next(s for s in get_surahs() if int(s["number"]) == surah_number)
+            if end_ayah < start_ayah or end_ayah > int(surah["numberOfAyahs"]):
+                raise ValueError("ژمارەی ئایەتی کۆتایی دەبێت لە %d تا %d بێت." % (start_ayah, int(surah["numberOfAyahs"])))
+            session["end_ayah"] = end_ayah
+            session["state"] = "design"
+            send_message(chat_id, "🎨 دیزاینی ڤیدیۆکەت هەڵبژێرە:\n\n١. زمردی و زێڕین\n٢. شەوی شین\n٣. مۆر و زێڕ\n٤. خاکی و کرێمی\n٥. ڕەش و سپی", keyboard_designs())
         except Exception as exc:
-            log_exception(
-                "VIDEO CREATION ERROR | chat_id=%s" % chat_id,
-                exc,
-            )
-
-            try:
-                send_message(
-                    chat_id,
-                    "❌ نەمتوانی ڤیدیۆکە دروست بکەم.\n"
-                    + str(exc),
-                )
-            except Exception as send_exc:
-                log_exception(
-                    "Could not send error to Telegram",
-                    send_exc,
-                )
-
-        finally:
-            SESSIONS.pop(chat_id, None)
-
-            if job_dir:
-                shutil.rmtree(job_dir, ignore_errors=True)
-
+            send_message(chat_id, "ژمارەی ئایەتی کۆتایی دروست نییە: " + str(exc))
         return
 
     send_message(
@@ -1406,6 +1366,14 @@ def handle_callback(callback):
         return
 
     try:
+        if data.startswith("design:"):
+            design = int(data.split(":", 1)[1])
+            if design not in range(1, 6):
+                raise ValueError("دیزاینەکە دروست نییە.")
+            answer_callback(callback_id, "دیزاین هەڵبژێردرا")
+            create_selected_video(chat_id, design)
+            return
+
         if data == "change_reciter":
             SESSIONS[chat_id] = {"state": "reciter"}
 
