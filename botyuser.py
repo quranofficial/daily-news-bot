@@ -13,6 +13,15 @@ import urllib.request
 import urllib.parse
 import urllib.error
 
+from PIL import Image, ImageDraw, ImageFont
+
+try:
+    import arabic_reshaper
+    from bidi.algorithm import get_display as bidi_get_display
+except Exception:
+    arabic_reshaper = None
+    bidi_get_display = None
+
 import quran_video as qv
 
 
@@ -26,14 +35,13 @@ QURAN_API = "https://api.alquran.cloud/v1"
 
 # No fixed maximum ayah count per video.
 MAX_AYAHS = None
+MAX_BACKGROUND_BYTES = 20 * 1024 * 1024
 
 POLL_TIMEOUT = 30
 
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
 JOBS_DIR = os.path.join(BASE_DIR, "quran_user_jobs")
 TIMINGS_DIR = os.path.join(BASE_DIR, "reciter_timings")
-BACKGROUND_DIR = BASE_DIR
-BACKGROUND_BASE_URL = "https://raw.githubusercontent.com/quranofficial/daily-news-bot/main/"
 RECITERS_JSON_PATH = os.path.join(BASE_DIR, "reciters.json")
 LOG_PATH = os.path.join(BASE_DIR, "bot_debug.log")
 
@@ -340,37 +348,110 @@ def send_video(chat_id, path, caption):
         )
 
 
-def send_photo(chat_id, path, caption):
-    with open(path, "rb") as f:
-        telegram(
-            "sendPhoto",
-            {"chat_id": chat_id, "caption": caption},
-            {"photo": (os.path.basename(path), f.read(), "image/png")},
-            timeout=180,
-        )
+# =========================
+# BACKGROUND VIDEO HELPERS
+# =========================
+
+def ensure_preset_background(number, job_dir):
+    """Create a preset animated background; option 4 is pure black."""
+    number = int(number)
+    path = os.path.join(job_dir, "preset_background_%d.mp4" % number)
+
+    if number == 4:
+        # Completely black background: no gradient, noise, or decoration.
+        run_ffmpeg([
+            "ffmpeg", "-y", "-f", "lavfi", "-i",
+            "color=c=black:s=720x1280:r=24:d=8",
+            "-an", "-c:v", "libx264", "-preset", "ultrafast",
+            "-crf", "30", "-pix_fmt", "yuv420p",
+            "-movflags", "+faststart", path,
+        ])
+        return path
+
+    presets = {
+        1: ("0b302f", "1c6152"),
+        2: ("081a42", "24558c"),
+        3: ("30123f", "783d76"),
+    }
+    if number not in presets:
+        number = 1
+        path = os.path.join(job_dir, "preset_background_1.mp4")
+    start_color, end_color = presets[number]
+    run_ffmpeg([
+        "ffmpeg", "-y",
+        "-f", "lavfi", "-i",
+        "color=c=#%s:s=720x1280:r=24:d=8" % start_color,
+        "-vf",
+        "drawbox=x=0:y='mod(t*75\\,1280)':w=720:h=260:color=#%s@0.35:t=fill,"
+        "noise=alls=8:allf=t+u,format=yuv420p" % end_color,
+        "-an", "-c:v", "libx264", "-preset", "ultrafast",
+        "-crf", "30", "-movflags", "+faststart", path,
+    ])
+    return path
 
 
-def send_background_previews(chat_id, kind):
-    """Send the five GitHub background previews, then show selection buttons."""
-    ext = "png" if kind == "image" else "mp4"
-    for number in range(1, 6):
-        local_path = os.path.join(BACKGROUND_DIR, "%d.%s" % (number, ext))
-        if not os.path.isfile(local_path):
-            try:
-                download_file(BACKGROUND_BASE_URL + "%d.%s" % (number, ext), local_path, min_size=1000)
-            except Exception as exc:
-                log_error("BACKGROUND PREVIEW UNAVAILABLE | %s | %r" % (local_path, exc))
-                send_message(chat_id, "⚠️ فایل %d.%s لە GitHub نییە. دڵنیابە ناوەکە و شوێنی فایلەکە ڕاستە." % (number, ext))
-                continue
+def download_telegram_video(file_id, destination, expected_size=None):
+    """Download a video sent by a user through Telegram's Gallery picker."""
+    if expected_size and int(expected_size) > MAX_BACKGROUND_BYTES:
+        raise RuntimeError("قەبارەی ڤیدیۆکە زۆرە؛ تکایە ڤیدیۆیەک لە ٢٠ MB بچووکتر بنێرە.")
+
+    file_info = telegram("getFile", {"file_id": file_id})
+    file_path = file_info.get("file_path")
+    file_size = int(file_info.get("file_size") or expected_size or 0)
+    if not file_path:
+        raise RuntimeError("Telegram نەیتوانی شوێنی فایلەکە بدۆزێتەوە.")
+    if file_size > MAX_BACKGROUND_BYTES:
+        raise RuntimeError("قەبارەی ڤیدیۆکە زۆرە؛ سنوور ٢٠ MB ـە.")
+
+    url = "https://api.telegram.org/file/bot%s/%s" % (BOT_TOKEN, file_path)
+    request = urllib.request.Request(url, headers={"User-Agent": "QuranVideoBot/1.0"})
+    total = 0
+    with urllib.request.urlopen(request, timeout=120) as response, open(destination, "wb") as output:
+        while True:
+            chunk = response.read(1024 * 256)
+            if not chunk:
+                break
+            total += len(chunk)
+            if total > MAX_BACKGROUND_BYTES:
+                output.close()
+                try:
+                    os.remove(destination)
+                except OSError:
+                    pass
+                raise RuntimeError("قەبارەی ڤیدیۆکە لە ٢٠ MB زیاترە.")
+            output.write(chunk)
+
+    if total < 1000:
+        raise RuntimeError("فایلی ڤیدیۆکە بە تەواوی دابەزێنراو نییە.")
+    # Validate that FFmpeg can read the uploaded media.
+    probe = subprocess.run(
+        ["ffprobe", "-v", "error", "-show_entries", "format=duration", "-of", "default=noprint_wrappers=1:nokey=1", destination],
+        stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True
+    )
+    if probe.returncode != 0 or not probe.stdout.strip():
         try:
-            if kind == "image":
-                send_photo(chat_id, local_path, "🖼️ وێنەی پاشبنەما %d/5" % number)
-            else:
-                send_video(chat_id, local_path, "🎬 ڤیدیۆی پاشبنەما %d/5" % number)
-        except Exception as exc:
-            log_exception("BACKGROUND PREVIEW SEND FAILED", exc)
-            send_message(chat_id, "نەتوانرا پێشبینینی فایل %d بنێردرێت." % number)
-    send_message(chat_id, "⬇️ ئێستا ژمارەی ئەو پاشبنەمایە هەڵبژێرە کە دەتەوێت، یان لە گەلەری مۆبایل هەڵیبژێرە:", keyboard_backgrounds(kind))
+            os.remove(destination)
+        except OSError:
+            pass
+        raise RuntimeError("ئەم فایلە ڤیدیۆیەکی پشتڕاستکراو نییە؛ تکایە MP4 یان ڤیدیۆیەکی تر بنێرە.")
+    return destination
+
+
+def keyboard_backgrounds():
+    return {"inline_keyboard": [
+        [{"text": "🌿 ڤیدیۆی پاشبنەما ١", "callback_data": "background:1"}],
+        [{"text": "🌌 ڤیدیۆی پاشبنەما ٢", "callback_data": "background:2"}],
+        [{"text": "💜 ڤیدیۆی پاشبنەما ٣", "callback_data": "background:3"}],
+        [{"text": "⚫ پاشبنەمای تەواو ڕەش", "callback_data": "background:4"}],
+        [{"text": "📂 ڤیدیۆی خۆم لە Gallery", "callback_data": "background:gallery"}],
+    ]}
+
+
+def keyboard_tafsir_choice():
+    return {"inline_keyboard": [
+        [{"text": "📖 لەگەڵ تەفسیر", "callback_data": "tafsir:yes"}],
+        [{"text": "📜 بەبێ تەفسیر", "callback_data": "tafsir:no"}],
+    ]}
 
 
 # =========================
@@ -1014,6 +1095,147 @@ def find_surah_rows(surah_number, start_ayah, end_ayah):
 
 
 # =========================
+# TRANSPARENT QURAN TEXT OVERLAY
+# =========================
+
+OVERLAY_WIDTH = 720
+OVERLAY_HEIGHT = 1280
+
+
+def _font(path, size):
+    try:
+        if os.path.isfile(path):
+            return ImageFont.truetype(path, size=size)
+    except Exception:
+        pass
+    try:
+        return ImageFont.truetype("DejaVuSans.ttf", size=size)
+    except Exception:
+        return ImageFont.load_default()
+
+
+def _shape_rtl(text):
+    text = str(text or "").strip()
+    if not text:
+        return text
+    if arabic_reshaper and bidi_get_display:
+        try:
+            return bidi_get_display(arabic_reshaper.reshape(text))
+        except Exception:
+            return text
+    return text
+
+
+def _wrap_text(draw, text, font, max_width):
+    words = str(text or "").split()
+    if not words:
+        return []
+    lines = []
+    current = words[0]
+    for word in words[1:]:
+        trial = current + " " + word
+        try:
+            width = draw.textbbox((0, 0), _shape_rtl(trial), font=font)[2]
+        except Exception:
+            width = draw.textlength(_shape_rtl(trial), font=font)
+        if width <= max_width:
+            current = trial
+        else:
+            lines.append(current)
+            current = word
+    lines.append(current)
+    return lines
+
+
+def _draw_centered_block(draw, text, font_path, start_y, max_width,
+                         max_height, start_size, fill, stroke_fill=(0, 0, 0, 220),
+                         min_size=18, line_gap=12):
+    """Draw transparent text only; no panels or background rectangles."""
+    text = str(text or "").strip()
+    if not text:
+        return start_y
+    selected = None
+    for size in range(start_size, min_size - 1, -2):
+        font = _font(font_path, size)
+        lines = _wrap_text(draw, text, font, max_width)
+        line_height = size + line_gap
+        if len(lines) * line_height <= max_height:
+            selected = (font, lines, line_height)
+            break
+    if selected is None:
+        font = _font(font_path, min_size)
+        lines = _wrap_text(draw, text, font, max_width)
+        selected = (font, lines, min_size + line_gap)
+    font, lines, line_height = selected
+    y = start_y
+    for line in lines:
+        shaped = _shape_rtl(line)
+        draw.text((OVERLAY_WIDTH // 2, y), shaped, font=font, fill=fill,
+                  anchor="mt", align="center", stroke_width=2,
+                  stroke_fill=stroke_fill)
+        y += line_height
+    return y
+
+
+def create_transparent_ayah_image(ayah, index, image_path, design=1,
+                                  show_tafsir=False, ayah_font_size=48,
+                                  tafsir_font_size=29):
+    """Render surah/ayah/optional tafsir over a fully transparent canvas."""
+    image = Image.new("RGBA", (OVERLAY_WIDTH, OVERLAY_HEIGHT), (0, 0, 0, 0))
+    draw = ImageDraw.Draw(image)
+    quran_font = os.path.join(BASE_DIR, "quran.ttf")
+    tafsir_font = os.path.join(BASE_DIR, "rabartafsir.ttf")
+
+    # Design changes text accents only; it never paints a separate background.
+    accents = {
+        1: (244, 211, 135, 255),
+        2: (151, 210, 255, 255),
+        3: (225, 174, 255, 255),
+        4: (255, 219, 169, 255),
+        5: (245, 245, 245, 255),
+    }
+    accent = accents.get(int(design or 1), accents[1])
+    white = (255, 255, 255, 255)
+    surah_name = str(ayah.get("surah_name") or ayah.get("surah_name_ar") or "القرآن الكريم")
+    ayah_number = ayah.get("ayah_number", index)
+
+    # No frame and no filled rectangles: the selected background stays visible.
+    header_font = _font(tafsir_font, 32)
+    draw.text((OVERLAY_WIDTH // 2, 110), _shape_rtl(surah_name),
+              font=header_font, fill=accent, anchor="mt", align="center",
+              stroke_width=2, stroke_fill=(0, 0, 0, 230))
+    small_font = _font(tafsir_font, 24)
+    draw.text((OVERLAY_WIDTH // 2, 158), _shape_rtl("ئایەت " + str(ayah_number)),
+              font=small_font, fill=white, anchor="mt", align="center",
+              stroke_width=2, stroke_fill=(0, 0, 0, 230))
+
+    arabic = str(ayah.get("arabic") or ayah.get("text") or "").strip()
+    if show_tafsir:
+        verse_y, verse_height = 245, 320
+    else:
+        verse_y, verse_height = 320, 650
+    after_verse = _draw_centered_block(
+        draw, arabic, quran_font, verse_y, 620, verse_height,
+        int(ayah_font_size), white, min_size=24, line_gap=15,
+    )
+
+    if show_tafsir:
+        label_font = _font(tafsir_font, 30)
+        label_y = max(625, after_verse + 35)
+        draw.text((OVERLAY_WIDTH // 2, label_y), _shape_rtl("تەفسیری ئاسان"),
+                  font=label_font, fill=accent, anchor="mt", align="center",
+                  stroke_width=2, stroke_fill=(0, 0, 0, 230))
+        tafsir_text = str(ayah.get("tafsir") or ayah.get("translation") or "").strip()
+        _draw_centered_block(
+            draw, tafsir_text, tafsir_font, label_y + 55, 610, 390,
+            int(tafsir_font_size), white, min_size=16, line_gap=8,
+        )
+
+    image.save(image_path, "PNG")
+    return image_path
+
+
+# =========================
 # VIDEO CREATION
 # =========================
 
@@ -1041,7 +1263,9 @@ def run_ffmpeg(args):
         )
 
 
-def build_video(chat_id, ayahs, reciter_id, design=1, background_path=None, background_kind="image"):
+def build_video(chat_id, ayahs, reciter_id, design=1, background_video=None,
+                show_tafsir=False, tafsir_start=None, tafsir_end=None,
+                ayah_font_size=48, tafsir_font_size=29):
     stamp = str(int(time.time()))
 
     job_dir = os.path.join(
@@ -1127,35 +1351,62 @@ def build_video(chat_id, ayahs, reciter_id, design=1, background_path=None, back
                 "clip_%03d.mp4" % i,
             )
 
-            qv.create_ayah_image(
+            ayah_show_tafsir = bool(show_tafsir)
+            if ayah_show_tafsir:
+                ayah_show_tafsir = (
+                    tafsir_start is not None
+                    and tafsir_end is not None
+                    and int(tafsir_start) <= ayah_number <= int(tafsir_end)
+                )
+            create_transparent_ayah_image(
                 ayah,
                 i,
                 image_path,
                 design=design,
+                show_tafsir=ayah_show_tafsir,
+                ayah_font_size=ayah_font_size,
+                tafsir_font_size=tafsir_font_size,
             )
 
-            bg_path = background_path
-            if not bg_path or not os.path.isfile(bg_path):
-                raise RuntimeError("Background ـی هەڵبژێردراو نەدۆزرایەوە.")
-
-            bg_input = (["-stream_loop", "-1", "-i", bg_path]
-                        if background_kind == "video"
-                        else ["-loop", "1", "-i", bg_path])
-            ffmpeg_args = ["ffmpeg", "-y"] + bg_input + [
-                "-loop", "1", "-i", image_path,
-                "-ss", "%.3f" % start_time,
-                "-i", full_audio_path,
-                "-filter_complex",
-                "[0:v]scale=720:1280:force_original_aspect_ratio=increase,crop=720:1280[bg];"
-                "[1:v]scale=720:1280,format=rgba[ov];[bg][ov]overlay=0:0:shortest=1[v]",
-                "-map", "[v]", "-map", "2:a:0",
-                "-t", "%.3f" % duration,
-                "-c:v", "libx264", "-preset", "veryfast",
-                "-c:a", "aac", "-b:a", "128k",
-                "-pix_fmt", "yuv420p", "-shortest",
-                "-movflags", "+faststart", clip_path,
-            ]
-            run_ffmpeg(ffmpeg_args)
+            if background_video:
+                # Put the existing verse design semi-transparent over the moving background.
+                run_ffmpeg([
+                    "ffmpeg", "-y",
+                    "-stream_loop", "-1", "-i", background_video,
+                    "-loop", "1", "-framerate", "24", "-i", image_path,
+                    "-ss", "%.3f" % start_time, "-i", full_audio_path,
+                    "-filter_complex",
+                    "[0:v]scale=720:1280:force_original_aspect_ratio=increase,crop=720:1280,setsar=1[bg];"
+                    "[1:v]scale=720:1280,format=rgba[fg];"
+                    "[bg][fg]overlay=shortest=1,format=yuv420p[v]",
+                    "-map", "[v]", "-map", "2:a:0",
+                    "-t", "%.3f" % duration,
+                    "-c:v", "libx264", "-preset", "veryfast", "-crf", "27",
+                    "-c:a", "aac", "-b:a", "128k", "-pix_fmt", "yuv420p",
+                    "-shortest", "-movflags", "+faststart", clip_path,
+                ])
+            else:
+                run_ffmpeg([
+                    "ffmpeg", "-y",
+                    "-loop", "1",
+                    "-i", image_path,
+                    "-ss", "%.3f" % start_time,
+                    "-i", full_audio_path,
+                    "-map", "0:v:0",
+                    "-map", "1:a:0",
+                    "-t", "%.3f" % duration,
+                    "-c:v", "libx264",
+                    "-tune", "stillimage",
+                    "-c:a", "aac",
+                    "-b:a", "128k",
+                    "-pix_fmt", "yuv420p",
+                    "-vf",
+                    "scale=720:1280:force_original_aspect_ratio=decrease,"
+                    "pad=720:1280:(ow-iw)/2:(oh-ih)/2",
+                    "-shortest",
+                    "-movflags", "+faststart",
+                    clip_path,
+                ])
 
             clips.append(clip_path)
 
@@ -1207,35 +1458,13 @@ def build_video(chat_id, ayahs, reciter_id, design=1, background_path=None, back
         raise
 
 
-def keyboard_output_modes():
-    return {"inline_keyboard": [
-        [{"text": "🖼️ ١. ڕسم", "callback_data": "mode:image"}],
-        [{"text": "🎬 ٢. ڤیدیۆ", "callback_data": "mode:video"}],
-    ]}
-
-
-def keyboard_backgrounds(kind):
-    rows = []
-    for number in range(1, 6):
-        ext = "png" if kind == "image" else "mp4"
-        rows.append([{"text": "%s %d" % ("🖼️" if kind == "image" else "🎬", number),
-                      "callback_data": "background:%s:%d" % (kind, number)}])
-    rows.append([{"text": "📱 هەڵبژاردن لە گەلەری مۆبایل", "callback_data": "gallery:%s" % kind}])
-    return {"inline_keyboard": rows}
-
-
 def keyboard_designs():
     names = [
-        ("🏔️ ١. شاخ و ئاویشار", 1),
-        ("🕌 ٢. کەوانەی مزگەوت", 2),
-        ("🌙 ٣. شەوی ئەستێردار", 3),
-        ("🏜️ ٤. خۆرئاوابوون", 4),
-        ("🌿 ٥. دارستانی سەوز", 5),
-        ("📜 ٦. پەڕەی کۆن", 6),
-        ("💎 ٧. کریستاڵی شەفاف", 7),
-        ("👑 ٨. شاهانەی زێڕین", 8),
-        ("🌌 ٩. ئاسمانی نیلی", 9),
-        ("🍁 ١٠. پاییزی زێڕین", 10),
+        ("🌿 ١. زمردی و زێڕین", 1),
+        ("🌌 ٢. شەوی شین", 2),
+        ("💜 ٣. مۆر و زێڕ", 3),
+        ("🏜️ ٤. خاکی و کرێمی", 4),
+        ("⚪ ٥. سپی و ڕوون", 5),
     ]
     return {"inline_keyboard": [
         [{"text": name, "callback_data": "design:%d" % number}]
@@ -1243,44 +1472,107 @@ def keyboard_designs():
     ]}
 
 
-def download_telegram_file(file_id, destination):
-    info = telegram("getFile", {"file_id": file_id})
-    file_path = info.get("file_path")
-    if not file_path:
-        raise RuntimeError("Telegram نەیتوانی فایلەکە بدۆزێتەوە.")
-    url = "https://api.telegram.org/file/bot" + BOT_TOKEN + "/" + file_path
-    request = urllib.request.Request(url, headers={"User-Agent": "Mozilla/5.0 QuranBot/1.0"})
-    with urllib.request.urlopen(request, timeout=180) as response, open(destination, "wb") as output:
-        shutil.copyfileobj(response, output)
-    if not os.path.isfile(destination) or os.path.getsize(destination) < 100:
-        raise RuntimeError("فایلی وەرگیراو بەتاڵە یان تەواو نییە.")
-    return destination
+def keyboard_ayah_font_sizes():
+    sizes = [36, 42, 48, 54, 60]
+    return {"inline_keyboard": [
+        [{"text": "%d px" % size, "callback_data": "ayahsize:%d" % size}
+         for size in sizes[:3]],
+        [{"text": "%d px" % size, "callback_data": "ayahsize:%d" % size}
+         for size in sizes[3:]],
+    ]}
 
 
-def prompt_design(chat_id):
-    session = SESSIONS[chat_id]
-    session["state"] = "design"
-    send_message(chat_id, "🎨 ئێستا یەکێک لە ٥ دیزاینەکە هەڵبژێرە:", keyboard_designs())
+def keyboard_tafsir_font_sizes():
+    sizes = [18, 22, 26, 30, 34]
+    return {"inline_keyboard": [
+        [{"text": "%d px" % size, "callback_data": "tafsirsize:%d" % size}
+         for size in sizes[:3]],
+        [{"text": "%d px" % size, "callback_data": "tafsirsize:%d" % size}
+         for size in sizes[3:]],
+    ]}
 
 
-def create_selected_video(chat_id, design):
+def create_selected_video(chat_id, background_choice=None, uploaded_background=None, design=1):
     session = SESSIONS.get(chat_id)
-    if not session or session.get("state") != "design":
+    if not session or session.get("state") not in (
+        "background", "background_upload", "design", "confirm_background",
+        "ayah_font_size", "tafsir_font_size",
+    ):
         send_message(chat_id, "داواکارییەکەت بەسەرچووە؛ /start بنووسە.")
         return
+
+    if uploaded_background is None:
+        uploaded_background = session.get("uploaded_background")
+    if background_choice is None:
+        background_choice = session.get("background_choice", 1)
+
     job_dir = None
     try:
         surah_number = int(session["surah_number"])
         start_ayah = int(session["start_ayah"])
         end_ayah = int(session["end_ayah"])
         reciter_id = str(session["reciter_id"])
+        show_tafsir = bool(session.get("show_tafsir", False))
+        tafsir_start = session.get("tafsir_start")
+        tafsir_end = session.get("tafsir_end")
+        design = int(session.get("design", design) or design)
+        ayah_font_size = int(session.get("ayah_font_size", 48))
+        tafsir_font_size = int(session.get("tafsir_font_size", 29))
         ayahs = find_surah_rows(surah_number, start_ayah, end_ayah)
         surah = next(s for s in get_surahs() if int(s["number"]) == surah_number)
         reciter_name = RECITERS[reciter_id]["name"]
-        send_message(chat_id, "⏳ ڤیدیۆکەت دروست دەکەم...\n🎙️ قاری: %s\nسوورەت: %s\nئایەتەکان: %d–%d\n🎨 دیزاین: %d/10\nتکایە چاوەڕێ بکە." % (reciter_name, surah["name"], start_ayah, end_ayah, design))
-        video_path, job_dir = build_video(chat_id, ayahs, reciter_id, design=design, background_path=session.get("background_path"), background_kind=session.get("background_kind", "image"))
-        send_video(chat_id, video_path, "قورئانی پیرۆز — %s\nقاری: %s\nئایەت %d–%d" % (surah["name"], reciter_name, start_ayah, end_ayah))
-        send_message(chat_id, "✅ ڤیدیۆکە بە سەرکەوتوویی بۆ تۆ نێردرا.")
+
+        # Create the job directory first so preset backgrounds can live inside it.
+        stamp = str(int(time.time()))
+        job_dir = os.path.join(JOBS_DIR, str(chat_id), stamp)
+        os.makedirs(job_dir, exist_ok=True)
+
+        if uploaded_background:
+            background_video = uploaded_background
+            background_label = "ڤیدیۆی خۆت"
+        else:
+            background_video = ensure_preset_background(int(background_choice), job_dir)
+            background_label = "پاشبنەمای %s" % background_choice
+
+        send_message(
+            chat_id,
+            "⏳ ڤیدیۆکەت دروست دەکەم...\n"
+            "🎙️ قاری: %s\nسوورەت: %s\nئایەت: %d–%d\n"
+            "🎞️ پاشبنەما: %s\n"
+            "📝 تەفسیر: %s\n"
+            "🎨 شێوازی نووسین: %s\nتکایە چاوەڕێ بکە."
+            % (reciter_name, surah["name"], start_ayah, end_ayah,
+               background_label,
+               ("ئایەت %s–%s" % (tafsir_start, tafsir_end)) if show_tafsir else "بەبێ تەفسیر",
+               design),
+        )
+
+        # build_video creates its own job directory; use the background copied into it.
+        build_background = background_video
+        if uploaded_background:
+            stable_bg = os.path.join(job_dir, "uploaded_background.mp4")
+            shutil.copy2(uploaded_background, stable_bg)
+            build_background = stable_bg
+
+        video_path, build_job_dir = build_video(
+            chat_id, ayahs, reciter_id, design=design,
+            background_video=build_background,
+            show_tafsir=show_tafsir,
+            tafsir_start=tafsir_start,
+            tafsir_end=tafsir_end,
+            ayah_font_size=ayah_font_size,
+            tafsir_font_size=tafsir_font_size,
+        )
+        try:
+            send_video(
+                chat_id, video_path,
+                "قورئانی پیرۆز — %s\nقاری: %s\nئایەت %d–%d\nتەفسیر: %s"
+                % (surah["name"], reciter_name, start_ayah, end_ayah,
+                   ("ئایەت %s–%s" % (tafsir_start, tafsir_end)) if show_tafsir else "بەبێ تەفسیر"),
+            )
+            send_message(chat_id, "✅ ڤیدیۆکە بە سەرکەوتوویی بۆ تۆ نێردرا.")
+        finally:
+            shutil.rmtree(build_job_dir, ignore_errors=True)
     except Exception as exc:
         log_exception("VIDEO CREATION ERROR | chat_id=%s" % chat_id, exc)
         try:
@@ -1288,7 +1580,13 @@ def create_selected_video(chat_id, design):
         except Exception as send_exc:
             log_exception("Could not send error to Telegram", send_exc)
     finally:
-        SESSIONS.pop(chat_id, None)
+        # Keep session only if waiting for a Gallery video; otherwise finish this request.
+        current = SESSIONS.get(chat_id, {})
+        if current.get("state") != "background_upload":
+            uploaded_path = current.get("uploaded_background")
+            if uploaded_path:
+                shutil.rmtree(os.path.dirname(uploaded_path), ignore_errors=True)
+            SESSIONS.pop(chat_id, None)
         if job_dir:
             shutil.rmtree(job_dir, ignore_errors=True)
 
@@ -1351,48 +1649,53 @@ def handle_message(message):
 
     session = SESSIONS.get(chat_id)
 
+    # Users can choose a clip from their phone Gallery and send it to the bot.
+    if session and session.get("state") == "background_upload":
+        media = message.get("video")
+        document = message.get("document")
+        file_id = None
+        file_size = None
+        if media:
+            file_id = media.get("file_id")
+            file_size = media.get("file_size")
+        elif document:
+            mime = (document.get("mime_type") or "").lower()
+            filename = (document.get("file_name") or "").lower()
+            if mime.startswith("video/") or filename.endswith((".mp4", ".mov", ".m4v", ".webm", ".mkv")):
+                file_id = document.get("file_id")
+                file_size = document.get("file_size")
+        if file_id:
+            try:
+                if file_size and int(file_size) > MAX_BACKGROUND_BYTES:
+                    raise RuntimeError("قەبارەی ڤیدیۆکە زۆرە؛ تکایە ڤیدیۆیەک لە ٢٠ MB بچووکتر بنێرە.")
+                upload_dir = os.path.join(JOBS_DIR, str(chat_id), "gallery_upload")
+                os.makedirs(upload_dir, exist_ok=True)
+                upload_path = os.path.join(upload_dir, "user_background.mp4")
+                send_message(chat_id, "⏬ ڤیدیۆکەت وەردەگرم، تکایە چاوەڕێ بکە...")
+                download_telegram_video(file_id, upload_path, file_size)
+                # Store the path and wait for a simple confirmation callback.
+                session["uploaded_background"] = upload_path
+                session["state"] = "confirm_background"
+                send_message(
+                    chat_id,
+                    "✅ ڤیدیۆکە وەرگیرا. ئەم ڤیدیۆیە وەک پاشبنەما بەکاربهێنم؟",
+                    {"inline_keyboard": [
+                        [{"text": "✅ بەڵێ، بەکاریبهێنە", "callback_data": "background:use_upload"}],
+                        [{"text": "↩️ گەڕانەوە بۆ پاشبنەماکان", "callback_data": "background:back"}],
+                    ]},
+                )
+            except Exception as exc:
+                log_exception("BACKGROUND UPLOAD FAILED | chat_id=%s" % chat_id, exc)
+                send_message(chat_id, "❌ نەمتوانی ئەم ڤیدیۆیە وەربگرم. " + str(exc) + "\nڤیدیۆیەکی تر بنێرە یان /cancel بکە.")
+            return
+        send_message(chat_id, "تکایە ڤیدیۆیەک لە Gallery هەڵبژێرە و وەک ڤیدیۆ بینێرە (تا ٢٠ MB).")
+        return
+
     if not session:
         send_message(
             chat_id,
             "بۆ دەستپێکردن /start بنووسە.",
         )
-        return
-
-    # Receive a custom photo/video from the user's Telegram gallery.
-    if session.get("state") == "await_gallery_upload":
-        mode = session.get("background_kind", "image")
-        try:
-            os.makedirs(JOBS_DIR, exist_ok=True)
-            if mode == "image":
-                photos = message.get("photo") or []
-                if not photos:
-                    send_message(chat_id, "تکایە وێنەیەک بنێرە، یان /cancel بنووسە.")
-                    return
-                file_id = photos[-1]["file_id"]
-                destination = os.path.join(JOBS_DIR, "bg_%s_custom.jpg" % chat_id)
-            else:
-                video = message.get("video")
-                if not video:
-                    send_message(chat_id, "تکایە ڤیدیۆیەکی MP4 بنێرە، یان /cancel بنووسە.")
-                    return
-                file_id = video["file_id"]
-                destination = os.path.join(JOBS_DIR, "bg_%s_custom.mp4" % chat_id)
-            download_telegram_file(file_id, destination)
-            if mode == "video":
-                probe = subprocess.run(["ffprobe", "-v", "error", "-show_entries", "format=duration", "-of", "default=noprint_wrappers=1:nokey=1", destination], stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
-                if probe.returncode != 0:
-                    raise RuntimeError("فایلەکە ڤیدیۆیەکی دروستی MP4 نییە.")
-            session["background_path"] = destination
-            session["background_kind"] = mode
-            send_message(chat_id, "✅ پاشبنەماکەت وەرگیرا. ڕەنگ و دیزاینی دەق هەڵبژێرە:")
-            prompt_design(chat_id)
-        except Exception as exc:
-            log_exception("CUSTOM BACKGROUND UPLOAD ERROR", exc)
-            send_message(chat_id, "❌ نەمتوانی فایلەکە وەربگرم: " + str(exc))
-        return
-
-    if message.get("photo") or message.get("video"):
-        send_message(chat_id, "بۆ بەکارهێنانی گەلەری، سەرەتا /start بنووسە و قۆناغەکان تەواو بکە.")
         return
 
     if session.get("state") == "start_ayah":
@@ -1448,10 +1751,37 @@ def handle_message(message):
             if end_ayah < start_ayah or end_ayah > int(surah["numberOfAyahs"]):
                 raise ValueError("ژمارەی ئایەتی کۆتایی دەبێت لە %d تا %d بێت." % (start_ayah, int(surah["numberOfAyahs"])))
             session["end_ayah"] = end_ayah
-            session["state"] = "output_mode"
-            send_message(chat_id, "دەتەوێت پاشبنەماکە ڕسم بێت یان ڤیدیۆ؟", keyboard_output_modes())
+            session["state"] = "tafsir_choice"
+            send_message(
+                chat_id,
+                "ئایا دەتەوێت تەفسیر لە ڤیدیۆکەدا پیشان بدرێت؟\n\n"
+                "ئەگەر بەڵێ هەڵبژێریت، دواتر دەستپێک و کۆتایی مەودای تەفسیر دیاری دەکەیت."
+                , keyboard_tafsir_choice(),
+            )
         except Exception as exc:
             send_message(chat_id, "ژمارەی ئایەتی کۆتایی دروست نییە: " + str(exc))
+        return
+
+    if session.get("state") in ("tafsir_start", "tafsir_end"):
+        try:
+            number = int(text)
+            start_ayah = int(session["start_ayah"])
+            end_ayah = int(session["end_ayah"])
+            if number < start_ayah or number > end_ayah:
+                raise ValueError("ژمارەکە دەبێت لە %d تا %d بێت." % (start_ayah, end_ayah))
+            if session.get("state") == "tafsir_start":
+                session["tafsir_start"] = number
+                session["state"] = "tafsir_end"
+                send_message(chat_id, "دەستپێکی تەفسیر: %d\nئێستا ژمارەی ئایەتی کۆتایی تەفسیر بنووسە (%d–%d)." % (number, number, end_ayah))
+            else:
+                tafsir_start = int(session["tafsir_start"])
+                if number < tafsir_start:
+                    raise ValueError("کۆتایی تەفسیر نابێت بچووکتر بێت لە دەستپێکی تەفسیر.")
+                session["tafsir_end"] = number
+                session["state"] = "background"
+                send_message(chat_id, "🎞️ ئێستا پاشبنەمای ڤیدیۆکەت هەڵبژێرە:", keyboard_backgrounds())
+        except Exception as exc:
+            send_message(chat_id, "ژمارەی مەودای تەفسیر دروست نییە. " + str(exc))
         return
 
     send_message(
@@ -1481,61 +1811,127 @@ def handle_callback(callback):
         return
 
     try:
-        if data.startswith("mode:"):
-            kind = data.split(":", 1)[1]
-            if kind not in ("image", "video"):
-                raise ValueError("جۆری پاشبنەما دروست نییە.")
-            session = SESSIONS.get(chat_id)
-            if not session or session.get("state") != "output_mode":
-                raise ValueError("تکایە /start دووبارە بکە.")
-            session["background_kind"] = kind
-            session["state"] = "background_choice"
-            label = "وێنە" if kind == "image" else "ڤیدیۆ"
-            edit_message(chat_id, message_id, "⏳ پێشبینینی ٥ پاشبنەما دەنێرم...")
-            answer_callback(callback_id)
-            send_background_previews(chat_id, kind)
-            return
-
-        if data.startswith("gallery:"):
-            kind = data.split(":", 1)[1]
-            session = SESSIONS.get(chat_id)
-            if not session or session.get("state") != "background_choice":
-                raise ValueError("تکایە /start دووبارە بکە.")
-            session["background_kind"] = kind
-            session["state"] = "await_gallery_upload"
-            answer_callback(callback_id)
-            send_message(chat_id, "📱 ئێستا %s ـەکەت لە گەلەری بنێرە بۆ بۆتەکە." % ("وێنە" if kind == "image" else "ڤیدیۆی MP4"))
-            return
-
         if data.startswith("background:"):
-            _, kind, raw_number = data.split(":", 2)
-            number = int(raw_number)
-            if kind not in ("image", "video") or number not in range(1, 6):
-                raise ValueError("پاشبنەماکە دروست نییە.")
+            choice = data.split(":", 1)[1]
             session = SESSIONS.get(chat_id)
-            if not session or session.get("state") != "background_choice":
-                raise ValueError("تکایە /start دووبارە بکە.")
-            ext = "png" if kind == "image" else "mp4"
-            local_path = os.path.join(BACKGROUND_DIR, "%d.%s" % (number, ext))
-            if not os.path.isfile(local_path):
-                url = BACKGROUND_BASE_URL + "%d.%s" % (number, ext)
-                try:
-                    download_file(url, local_path, min_size=1000)
-                except Exception as exc:
-                    raise RuntimeError("فایلی %d.%s لە GitHub نەدۆزرایەوە. دڵنیابە فایلەکە لە ڕەگی repository ـەکەت بارکراوە. %s" % (number, ext, exc))
-            session["background_path"] = local_path
-            session["background_kind"] = kind
-            session["state"] = "design"
-            answer_callback(callback_id, "پاشبنەما هەڵبژێردرا")
-            send_message(chat_id, "✅ پاشبنەما هەڵبژێردرا. ئێستا دیزاین هەڵبژێرە:", keyboard_designs())
+            if not session:
+                answer_callback(callback_id, "داواکارییەکە بەسەرچووە")
+                return
+            if choice in ("1", "2", "3", "4"):
+                if session.get("state") != "background":
+                    answer_callback(callback_id, "سەرەتا هەنگاوەکان تەواو بکە")
+                    return
+                session["background_choice"] = int(choice)
+                session["state"] = "design"
+                answer_callback(callback_id, "پاشبنەما هەڵبژێردرا")
+                send_message(chat_id, "🎨 ڕەنگی نووسین هەڵبژێرە؛ دواتر قەبارەی ئایەت و تەفسیر بە جیا هەڵدەبژێریت:", keyboard_designs())
+                return
+            if choice == "gallery":
+                session["state"] = "background_upload"
+                answer_callback(callback_id, "ڤیدیۆکەت بنێرە")
+                send_message(chat_id, "📂 ئێستا ڤیدیۆکەت لە Gallery هەڵبژێرە و بینێرە بۆ ئەم بۆتە.\nقەبارە: تا ٢٠ MB. باشترە MP4 و ستوونی بێت.")
+                return
+            if choice == "use_upload":
+                upload_path = session.get("uploaded_background")
+                if not upload_path or not os.path.isfile(upload_path):
+                    answer_callback(callback_id, "ڤیدیۆکە نەماوە؛ تکایە دووبارە بینێرە")
+                    session["state"] = "background_upload"
+                    return
+                session["state"] = "design"
+                session["background_choice"] = 1
+                answer_callback(callback_id, "پاشبنەما هەڵبژێردرا")
+                send_message(chat_id, "🎨 ڕەنگی نووسین هەڵبژێرە:", keyboard_designs())
+                return
+            if choice == "back":
+                session.pop("uploaded_background", None)
+                session["state"] = "background"
+                answer_callback(callback_id)
+                send_message(chat_id, "🎞️ پاشبنەمایەک هەڵبژێرە:", keyboard_backgrounds())
+                return
+
+        if data.startswith("tafsir:"):
+            session = SESSIONS.get(chat_id)
+            if not session or session.get("state") != "tafsir_choice":
+                answer_callback(callback_id, "سەرەتا مەودای ئایەت دیاری بکە")
+                return
+            choice = data.split(":", 1)[1]
+            if choice == "yes":
+                session["show_tafsir"] = True
+                session["state"] = "tafsir_start"
+                answer_callback(callback_id, "تەفسیر چالاک کرا")
+                send_message(chat_id, "ژمارەی ئایەتی دەستپێکی تەفسیر بنووسە (%d–%d)." % (int(session["start_ayah"]), int(session["end_ayah"])))
+            elif choice == "no":
+                session["show_tafsir"] = False
+                session.pop("tafsir_start", None)
+                session.pop("tafsir_end", None)
+                session["state"] = "background"
+                answer_callback(callback_id, "بەبێ تەفسیر")
+                send_message(chat_id, "🎞️ ئێستا پاشبنەمای ڤیدیۆکەت هەڵبژێرە:", keyboard_backgrounds())
+            else:
+                answer_callback(callback_id, "هەڵبژاردنەکە نادروستە")
             return
 
         if data.startswith("design:"):
+            session = SESSIONS.get(chat_id)
+            if not session or session.get("state") != "design":
+                answer_callback(callback_id, "سەرەتا پاشبنەما هەڵبژێرە")
+                return
             design = int(data.split(":", 1)[1])
-            if design not in range(1, 11):
-                raise ValueError("دیزاینەکە دروست نییە.")
-            answer_callback(callback_id, "دیزاین هەڵبژێردرا")
-            create_selected_video(chat_id, design)
+            if design not in (1, 2, 3, 4, 5):
+                design = 1
+            session["design"] = design
+            session["state"] = "ayah_font_size"
+            answer_callback(callback_id, "شێوازی نووسین هەڵبژێردرا")
+            send_message(
+                chat_id,
+                "🔠 قەبارەی نووسینی ئایەت هەڵبژێرە:",
+                keyboard_ayah_font_sizes(),
+            )
+            return
+
+        if data.startswith("ayahsize:"):
+            session = SESSIONS.get(chat_id)
+            if not session or session.get("state") != "ayah_font_size":
+                answer_callback(callback_id, "سەرەتا دیزاین هەڵبژێرە")
+                return
+            size = int(data.split(":", 1)[1])
+            if size not in (36, 42, 48, 54, 60):
+                size = 48
+            session["ayah_font_size"] = size
+            if session.get("show_tafsir"):
+                session["state"] = "tafsir_font_size"
+                answer_callback(callback_id, "قەبارەی ئایەت هەڵبژێردرا")
+                send_message(
+                    chat_id,
+                    "🔠 ئێستا قەبارەی نووسینی تەفسیر هەڵبژێرە:",
+                    keyboard_tafsir_font_sizes(),
+                )
+            else:
+                answer_callback(callback_id, "قەبارە هەڵبژێردرا؛ ڤیدیۆ دروست دەکرێت")
+                create_selected_video(
+                    chat_id,
+                    session.get("background_choice", 1),
+                    uploaded_background=session.get("uploaded_background"),
+                    design=session.get("design", 1),
+                )
+            return
+
+        if data.startswith("tafsirsize:"):
+            session = SESSIONS.get(chat_id)
+            if not session or session.get("state") != "tafsir_font_size":
+                answer_callback(callback_id, "سەرەتا قەبارەی ئایەت هەڵبژێرە")
+                return
+            size = int(data.split(":", 1)[1])
+            if size not in (18, 22, 26, 30, 34):
+                size = 26
+            session["tafsir_font_size"] = size
+            answer_callback(callback_id, "قەبارە هەڵبژێردرا؛ ڤیدیۆ دروست دەکرێت")
+            create_selected_video(
+                chat_id,
+                session.get("background_choice", 1),
+                uploaded_background=session.get("uploaded_background"),
+                design=session.get("design", 1),
+            )
             return
 
         if data == "change_reciter":
