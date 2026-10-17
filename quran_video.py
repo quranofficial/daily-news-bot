@@ -24,6 +24,13 @@ WIDTH = 720
 HEIGHT = 1280
 AYAH_COUNT = 10
 
+# Include tafsir in the generated video?
+# Set INCLUDE_TAFSIR=true or INCLUDE_TAFSIR=false in your environment.
+# Default is true.
+INCLUDE_TAFSIR = os.environ.get("INCLUDE_TAFSIR", "true").strip().lower() in (
+    "1", "true", "yes", "y", "on"
+)
+
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
 
 WORK_DIR = os.path.join(BASE_DIR, "quran_video_work")
@@ -698,7 +705,7 @@ def get_random_verses():
 # CREATE PREMIUM VERSE IMAGE
 # =========================
 
-def create_ayah_image(ayah, index, image_path, design=1):
+def create_ayah_image(ayah, index, image_path, design=1, include_tafsir=True):
     # Five user-selectable palettes; layout and Quran text remain the same.
     palettes = {
         1: {"name": "زمردی و زێڕین", "top": (7, 29, 34), "bottom": (14, 48, 47), "gold": (218, 185, 111), "soft": (151, 127, 76), "white": (250, 247, 235), "muted": (206, 220, 213), "panel": (16, 43, 47), "edge": (65, 104, 91)},
@@ -867,82 +874,92 @@ def create_ayah_image(ayah, index, image_path, design=1):
         use_quran_font=True
     )
 
-    # Tafsir panel
-    draw.rounded_rectangle(
-        (43, 620, WIDTH - 43, 1095),
-        radius=27,
-        fill=panel + (224,),
-        outline=palette["edge"],
-        width=2
-    )
-
-    draw.rounded_rectangle(
-        (53, 630, WIDTH - 53, 1085),
-        radius=21,
-        outline=palette["edge"],
-        width=1
-    )
-
-    # Tafsir heading plaque: rabartafsir.ttf
-    draw.rounded_rectangle(
-        (175, 640, WIDTH - 175, 687),
-        radius=20,
-        fill=tuple(min(255, c + 12) for c in panel) + (235,),
-        outline=soft_gold,
-        width=1
-    )
-
-    draw.text(
-        (WIDTH // 2, 663),
-        shape_rtl("تەفسیری ئاسان"),
-        font=make_tafsir_font(27),
-        fill=gold,
-        anchor="mm",
-        direction="rtl",
-        language="ar"
-    )
-
-    # Decorative side markers
-    for x in (157, WIDTH - 157):
-        draw.ellipse(
-            (x - 3, 660, x + 3, 666),
-            fill=gold
+    if include_tafsir:
+        # Tafsir panel is drawn only when the user enables tafsir.
+        draw.rounded_rectangle(
+            (43, 620, WIDTH - 43, 1095),
+            radius=27,
+            fill=panel + (224,),
+            outline=palette["edge"],
+            width=2
         )
 
-    # Tafsir body: rabartafsir.ttf
-    draw_rtl_block(
-        draw,
-        ayah["tafsir"],
-        700,
-        WIDTH - 120,
-        32,
-        white,
-        max_lines=45,
-        line_gap=4,
-        max_height=370,
-        use_quran_font=False
-    )
+        draw.rounded_rectangle(
+            (53, 630, WIDTH - 53, 1085),
+            radius=21,
+            outline=palette["edge"],
+            width=1
+        )
+
+        # Tafsir heading plaque: rabartafsir.ttf
+        draw.rounded_rectangle(
+            (175, 640, WIDTH - 175, 687),
+            radius=20,
+            fill=tuple(min(255, c + 12) for c in panel) + (235,),
+            outline=soft_gold,
+            width=1
+        )
+
+        draw.text(
+            (WIDTH // 2, 663),
+            shape_rtl("تەفسیری ئاسان"),
+            font=make_tafsir_font(27),
+            fill=gold,
+            anchor="mm",
+            direction="rtl",
+            language="ar"
+        )
+
+        # Decorative side markers
+        for x in (157, WIDTH - 157):
+            draw.ellipse(
+                (x - 3, 660, x + 3, 666),
+                fill=gold
+            )
+
+        # Tafsir body: rabartafsir.ttf
+        draw_rtl_block(
+            draw,
+            ayah["tafsir"],
+            700,
+            WIDTH - 120,
+            32,
+            white,
+            max_lines=45,
+            line_gap=4,
+            max_height=370,
+            use_quran_font=False
+        )
+
+        footer_y = 1120
+        brand_y = 1160
+        bottom_line_y = 1190
+    else:
+        # With no tafsir, leave the background transparent below the Quran panel.
+        footer_y = 1015
+        brand_y = 1060
+        bottom_line_y = 1090
 
     # Footer separator
     draw.line(
-        (95, 1120, WIDTH - 95, 1120),
+        (95, footer_y, WIDTH - 95, footer_y),
         fill=soft_gold,
         width=1
     )
 
     draw.polygon(
         [
-            (WIDTH // 2, 1113),
-            (WIDTH // 2 + 7, 1120),
-            (WIDTH // 2, 1127),
-            (WIDTH // 2 - 7, 1120)
+            (WIDTH // 2, footer_y - 7),
+            (WIDTH // 2 + 7, footer_y),
+            (WIDTH // 2, footer_y + 7),
+            (WIDTH // 2 - 7, footer_y)
         ],
         fill=gold
     )
 
     # Brand footer: rabartafsir.ttf
     draw.text(
-        (WIDTH // 2, 1160),
+        (WIDTH // 2, brand_y),
         shape_rtl("قورئانی پیرۆز - ڕێگای ئیسلام"),
         font=make_tafsir_font(23),
         fill=gold,
@@ -952,7 +969,7 @@ def create_ayah_image(ayah, index, image_path, design=1):
     )
 
     draw.line(
-        (220, 1190, WIDTH - 220, 1190),
+        (220, bottom_line_y, WIDTH - 220, bottom_line_y),
         fill=(65, 101, 85),
         width=1
     )
@@ -995,7 +1012,7 @@ def download_ayah_audio(ayah, audio_path):
 # BUILD VIDEO
 # =========================
 
-def create_video():
+def create_video(include_tafsir=INCLUDE_TAFSIR):
     os.makedirs(WORK_DIR, exist_ok=True)
 
     selected_ayahs = get_random_verses()
@@ -1016,7 +1033,7 @@ def create_video():
             WORK_DIR, "clip_" + str(index) + ".mp4"
         )
 
-        create_ayah_image(ayah, index, image_path)
+        create_ayah_image(ayah, index, image_path, include_tafsir=include_tafsir)
         download_ayah_audio(ayah, audio_path)
 
         run_command([
@@ -1096,7 +1113,7 @@ def send_video(ayahs):
         + "–"
         + str(ayahs[-1]["ayah_number"])
         + "\n"
-        + "تەفسیری ئاسان - ڕێگای ئیسلام"
+        + ("تەفسیری ئاسان - ڕێگای ئیسلام" if INCLUDE_TAFSIR else "قورئانی پیرۆز - ڕێگای ئیسلام")
     )
 
     boundary = "----QuranVideoBoundary7MA4YWxkTrZu0gW"
@@ -1179,9 +1196,9 @@ def main():
             "نەدۆزرایەوە."
         )
 
-    print("Starting Quran tafsir video...")
+    print("Starting Quran video. Tafsir:", "ON" if INCLUDE_TAFSIR else "OFF")
 
-    selected_ayahs = create_video()
+    selected_ayahs = create_video(include_tafsir=INCLUDE_TAFSIR)
 
     print("Video created. Uploading to Telegram...")
 
