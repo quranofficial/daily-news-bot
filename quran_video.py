@@ -698,7 +698,7 @@ def get_random_verses():
 # CREATE PREMIUM VERSE IMAGE
 # =========================
 
-def create_ayah_image(ayah, index, image_path, design=1, transparent_background=False):
+def create_ayah_image(ayah, index, image_path, design=1):
     # Five user-selectable palettes; layout and Quran text remain the same.
     palettes = {
         1: {"name": "زمردی و زێڕین", "top": (7, 29, 34), "bottom": (14, 48, 47), "gold": (218, 185, 111), "soft": (151, 127, 76), "white": (250, 247, 235), "muted": (206, 220, 213), "panel": (16, 43, 47), "edge": (65, 104, 91)},
@@ -708,24 +708,9 @@ def create_ayah_image(ayah, index, image_path, design=1, transparent_background=
         5: {"name": "ڕەش و سپی", "top": (15, 18, 22), "bottom": (38, 42, 47), "gold": (224, 226, 229), "soft": (142, 148, 155), "white": (255, 255, 255), "muted": (216, 220, 224), "panel": (25, 29, 34), "edge": (96, 103, 112)},
     }
     palette = palettes.get(int(design or 1), palettes[1])
-    if transparent_background:
-        # The bot places this transparent text/layout layer over a moving nature video.
-        image = Image.new("RGBA", (WIDTH, HEIGHT), (0, 0, 0, 0))
-    else:
-        image = Image.new("RGB", (WIDTH, HEIGHT), palette["top"])
-
-    draw = ImageDraw.Draw(image)
-
-    if transparent_background:
-        # A light overall dark veil keeps moving scenery visible while making
-        # Quran text and ornaments readable over bright water/sky.
-        draw.rectangle((0, 0, WIDTH, HEIGHT), fill=(2, 9, 20, 62))
-
-    if not transparent_background:
-        for y in range(HEIGHT):
-            ratio = y / HEIGHT
-            color = tuple(int(a + (b - a) * ratio) for a, b in zip(palette["top"], palette["bottom"]))
-            draw.line((0, y, WIDTH, y), fill=color)
+    # Transparent overlay: the selected photo/video remains visible behind the Quran design.
+    image = Image.new("RGBA", (WIDTH, HEIGHT), (0, 0, 0, 0))
+    draw = ImageDraw.Draw(image, "RGBA")
 
     gold = palette["gold"]
     soft_gold = palette["soft"]
@@ -836,7 +821,7 @@ def create_ayah_image(ayah, index, image_path, design=1, transparent_background=
     draw.rounded_rectangle(
         (43, 205, WIDTH - 43, 600),
         radius=27,
-        fill=((*tuple(max(0, c - 7) for c in palette["top"]), 218) if transparent_background else tuple(max(0, c - 7) for c in palette["top"])),
+        fill=tuple(max(0, c - 7) for c in palette["top"]) + (165,),
         outline=gold,
         width=2
     )
@@ -878,7 +863,7 @@ def create_ayah_image(ayah, index, image_path, design=1, transparent_background=
     draw.rounded_rectangle(
         (43, 620, WIDTH - 43, 1095),
         radius=27,
-        fill=((*panel, 218) if transparent_background else panel),
+        fill=panel + (175,),
         outline=palette["edge"],
         width=2
     )
@@ -894,7 +879,7 @@ def create_ayah_image(ayah, index, image_path, design=1, transparent_background=
     draw.rounded_rectangle(
         (175, 640, WIDTH - 175, 687),
         radius=20,
-        fill=((*tuple(min(255, c + 12) for c in panel), 232) if transparent_background else tuple(min(255, c + 12) for c in panel)),
+        fill=tuple(min(255, c + 12) for c in panel) + (220,),
         outline=soft_gold,
         width=1
     )
