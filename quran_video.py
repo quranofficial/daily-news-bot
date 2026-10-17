@@ -24,13 +24,6 @@ WIDTH = 720
 HEIGHT = 1280
 AYAH_COUNT = 10
 
-# Include tafsir in the generated video?
-# Set INCLUDE_TAFSIR=true or INCLUDE_TAFSIR=false in your environment.
-# Default is true.
-INCLUDE_TAFSIR = os.environ.get("INCLUDE_TAFSIR", "true").strip().lower() in (
-    "1", "true", "yes", "y", "on"
-)
-
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
 
 WORK_DIR = os.path.join(BASE_DIR, "quran_video_work")
@@ -702,319 +695,101 @@ def get_random_verses():
 
 
 # =========================
-# TRANSPARENT TEXT OVERLAY (NO PANELS/BOXES)
-# =========================
-def create_text_overlay(ayah, index, image_path, include_tafsir=True, settings=None):
-    """Transparent overlay: only text, no boxes, cards, panels, or background."""
-    settings = settings or {}
-    image = Image.new("RGBA", (WIDTH, HEIGHT), (0, 0, 0, 0))
-    draw = ImageDraw.Draw(image)
-    ayah_color = tuple(settings.get("ayah_color", (255, 255, 255)))
-    tafsir_color = tuple(settings.get("tafsir_color", (255, 210, 90)))
-    other_color = tuple(settings.get("other_color", (255, 255, 255)))
-    ayah_size = int(settings.get("ayah_size", 44))
-    tafsir_size = int(settings.get("tafsir_size", 30))
-    other_size = int(settings.get("other_size", 24))
-    ayah_y = int(settings.get("ayah_y", 250))
-    tafsir_y = int(settings.get("tafsir_y", 690))
-    other_y = int(settings.get("other_y", 115))
-    draw.text((WIDTH // 2, other_y), shape_rtl(str(ayah.get("surah_name", ""))),
-              font=make_font(other_size), fill=other_color, anchor="mm", direction="rtl", language="ar")
-    if settings.get("show_ayah_number", True):
-        draw.text((WIDTH // 2, other_y + other_size + 12), shape_rtl("ئایەتی " + str(ayah.get("ayah_number", ""))),
-                  font=make_font(max(12, other_size - 3)), fill=other_color, anchor="mm", direction="rtl", language="ar")
-    draw_rtl_block(draw, ayah.get("arabic", ""), ayah_y, WIDTH - 80, ayah_size, ayah_color,
-                   max_lines=35, line_gap=8, max_height=int(settings.get("ayah_height", 340)), use_quran_font=True)
-    if include_tafsir:
-        draw_rtl_block(draw, ayah.get("tafsir", ""), tafsir_y, WIDTH - 90, tafsir_size, tafsir_color,
-                       max_lines=50, line_gap=5, max_height=int(settings.get("tafsir_height", 430)), use_quran_font=False)
-    if settings.get("show_footer", True):
-        draw.text((WIDTH // 2, int(settings.get("footer_y", 1190))), shape_rtl("قورئانی پیرۆز - ڕێگای ئیسلام"),
-                  font=make_tafsir_font(max(12, other_size - 1)), fill=other_color, anchor="mm", direction="rtl", language="ar")
-    image.save(image_path)
-
-
-# =========================
 # CREATE PREMIUM VERSE IMAGE
 # =========================
 
-def create_ayah_image(ayah, index, image_path, design=1, include_tafsir=True, settings=None):
-    if settings is None or settings.get("plain_overlay", True):
-        return create_text_overlay(ayah, index, image_path, include_tafsir, settings)
-    # Five user-selectable palettes; layout and Quran text remain the same.
-    palettes = {
-        1: {"name": "زمردی و زێڕین", "top": (7, 29, 34), "bottom": (14, 48, 47), "gold": (218, 185, 111), "soft": (151, 127, 76), "white": (250, 247, 235), "muted": (206, 220, 213), "panel": (16, 43, 47), "edge": (65, 104, 91)},
-        2: {"name": "شەوی شین", "top": (8, 20, 48), "bottom": (23, 45, 83), "gold": (232, 198, 121), "soft": (156, 145, 110), "white": (250, 249, 245), "muted": (205, 220, 241), "panel": (17, 35, 66), "edge": (73, 104, 157)},
-        3: {"name": "مۆر و زێڕ", "top": (31, 16, 43), "bottom": (62, 30, 67), "gold": (235, 194, 126), "soft": (159, 122, 100), "white": (255, 247, 244), "muted": (226, 207, 230), "panel": (43, 24, 53), "edge": (112, 75, 124)},
-        4: {"name": "خاکی و کرێمی", "top": (48, 34, 24), "bottom": (83, 61, 41), "gold": (244, 211, 151), "soft": (174, 137, 93), "white": (255, 248, 232), "muted": (231, 215, 188), "panel": (57, 42, 31), "edge": (139, 105, 72)},
-        5: {"name": "دارستانی سەوز", "top": (5, 35, 27), "bottom": (10, 61, 42), "gold": (236, 199, 105), "soft": (158, 135, 75), "white": (255, 252, 239), "muted": (208, 230, 207), "panel": (5, 31, 25), "edge": (65, 122, 85)},
-        6: {"name": "پەڕەی کۆن", "top": (55, 37, 23), "bottom": (92, 66, 39), "gold": (236, 204, 144), "soft": (164, 124, 78), "white": (255, 245, 220), "muted": (231, 213, 180), "panel": (48, 31, 20), "edge": (147, 108, 66)},
-        7: {"name": "کریستاڵی شەفاف", "top": (9, 43, 56), "bottom": (21, 75, 91), "gold": (135, 229, 225), "soft": (96, 169, 177), "white": (244, 255, 255), "muted": (196, 233, 238), "panel": (7, 40, 53), "edge": (80, 171, 186)},
-        8: {"name": "شاهانەی زێڕین", "top": (26, 12, 22), "bottom": (61, 24, 34), "gold": (246, 198, 94), "soft": (174, 125, 59), "white": (255, 248, 232), "muted": (230, 208, 174), "panel": (31, 13, 23), "edge": (137, 78, 54)},
-        9: {"name": "ئاسمانی نیلی", "top": (8, 18, 54), "bottom": (30, 28, 83), "gold": (192, 180, 255), "soft": (128, 123, 189), "white": (250, 248, 255), "muted": (216, 214, 244), "panel": (13, 19, 57), "edge": (94, 92, 165)},
-        10: {"name": "پاییزی زێڕین", "top": (63, 27, 12), "bottom": (104, 47, 18), "gold": (255, 204, 116), "soft": (188, 123, 57), "white": (255, 247, 228), "muted": (245, 217, 177), "panel": (52, 23, 13), "edge": (163, 87, 39)},
-    }
-    palette = palettes.get(int(design or 1), palettes[1])
+def create_ayah_image(ayah, index, image_path, design=1):
+    """Create a transparent text-only overlay; the chosen background stays visible."""
     image = Image.new("RGBA", (WIDTH, HEIGHT), (0, 0, 0, 0))
     draw = ImageDraw.Draw(image)
 
-    gold = palette["gold"]
-    soft_gold = palette["soft"]
-    white = palette["white"]
-    muted_white = palette["muted"]
-    panel = palette["panel"]
-
-    # Outer frame
-    style = int(design or 1)
-    if style in (2, 8):
-        draw.arc((20, 15, WIDTH - 20, 260), 180, 360, fill=gold, width=4)
-        draw.line((20, 130, 20, HEIGHT - 45, WIDTH - 20, HEIGHT - 45, WIDTH - 20, 130), fill=gold, width=3)
-        draw.rounded_rectangle((31, 31, WIDTH - 31, HEIGHT - 31), radius=24, outline=palette["edge"], width=2)
-    elif style in (3, 9):
-        draw.rounded_rectangle((24, 24, WIDTH - 24, HEIGHT - 24), radius=70, outline=gold, width=2)
-        draw.rounded_rectangle((38, 38, WIDTH - 38, HEIGHT - 38), radius=58, outline=palette["edge"], width=2)
-    elif style in (4, 6, 10):
-        draw.rectangle((22, 22, WIDTH - 22, HEIGHT - 22), outline=gold, width=3)
-        draw.rectangle((34, 34, WIDTH - 34, HEIGHT - 34), outline=palette["edge"], width=1)
-    elif style == 7:
-        draw.rounded_rectangle((20, 20, WIDTH - 20, HEIGHT - 20), radius=48, outline=gold, width=2)
-        draw.rounded_rectangle((29, 29, WIDTH - 29, HEIGHT - 29), radius=42, outline=palette["edge"], width=3)
-    else:
-        draw.rounded_rectangle((19, 19, WIDTH - 19, HEIGHT - 19), radius=32, outline=gold, width=3)
-        draw.rounded_rectangle((31, 31, WIDTH - 31, HEIGHT - 31), radius=27, outline=palette["edge"], width=1)
-
-    # Decorative corners
-    corner_size = 42
-    margin = 42
-
-    corners = [
-        (margin, margin, 1, 1),
-        (WIDTH - margin, margin, -1, 1),
-        (margin, HEIGHT - margin, 1, -1),
-        (WIDTH - margin, HEIGHT - margin, -1, -1)
-    ]
-
-    for x, y, dx, dy in corners:
-        draw.line(
-            (x, y, x + dx * corner_size, y),
-            fill=gold,
-            width=2
-        )
-
-        draw.line(
-            (x, y, x, y + dy * corner_size),
-            fill=gold,
-            width=2
-        )
-
-        draw.ellipse(
-            (x - 4, y - 4, x + 4, y + 4),
-            fill=gold
-        )
-
-    # Header separator
-    draw.line(
-        (155, 77, WIDTH - 155, 77),
-        fill=soft_gold,
-        width=1
+    # Header text only: no panels, cards, borders, or boxes.
+    draw.text(
+        (WIDTH // 2, 70),
+        shape_rtl(ayah.get("surah_name", "")),
+        font=make_tafsir_font(30),
+        fill=(255, 220, 130, 255),
+        anchor="mm",
+        direction="rtl",
+        language="ar",
     )
-
-    # Decorative diamond
-    cx = WIDTH // 2
-    cy = 77
-
-    draw.polygon(
-        [
-            (cx, cy - 7),
-            (cx + 7, cy),
-            (cx, cy + 7),
-            (cx - 7, cy)
-        ],
-        fill=gold
-    )
-
-    # Surah name: Kurdish/system font
     draw.text(
         (WIDTH // 2, 112),
-        shape_rtl(ayah["surah_name"]),
-        font=make_font(29),
-        fill=gold,
+        shape_rtl("ئایەتی " + str(ayah.get("ayah_number", ""))),
+        font=make_tafsir_font(23),
+        fill=(255, 255, 255, 255),
         anchor="mm",
         direction="rtl",
-        language="ar"
+        language="ar",
     )
 
-    # Ayah number: Kurdish/system font
-    draw.text(
-        (WIDTH // 2, 155),
-        shape_rtl("ئایەتی " + str(ayah["ayah_number"])),
-        font=make_font(23),
-        fill=muted_white,
-        anchor="mm",
-        direction="rtl",
-        language="ar"
-    )
-
-    # Header divider
-    draw.line(
-        (245, 184, WIDTH - 245, 184),
-        fill=(72, 112, 94),
-        width=1
-    )
-
-    draw.ellipse(
-        (WIDTH // 2 - 4, 180, WIDTH // 2 + 4, 188),
-        fill=gold
-    )
-
-    # Quran verse panel
-    draw.rounded_rectangle(
-        (43, 205, WIDTH - 43, 600),
-        radius=27,
-        fill=tuple(max(0, c - 7) for c in palette["top"]) + (218,),
-        outline=gold,
-        width=2
-    )
-
-    draw.rounded_rectangle(
-        (53, 215, WIDTH - 53, 590),
-        radius=22,
-        outline=palette["edge"],
-        width=1
-    )
-
-    # Decorative markers
-    for marker_y in (230, 575):
-        draw.ellipse(
-            (
-                WIDTH // 2 - 4,
-                marker_y - 4,
-                WIDTH // 2 + 4,
-                marker_y + 4
-            ),
-            fill=gold
-        )
-
-    # Arabic Quran text: quran.ttf ONLY
-    draw_rtl_block(
-        draw,
-        ayah["arabic"],
-        240,
-        WIDTH - 120,
-        39,
-        white,
-        max_lines=30,
-        line_gap=5,
-        max_height=325,
-        use_quran_font=True
-    )
-
-    if include_tafsir:
-        # Tafsir panel is drawn only when the user enables tafsir.
-        draw.rounded_rectangle(
-            (43, 620, WIDTH - 43, 1095),
-            radius=27,
-            fill=panel + (224,),
-            outline=palette["edge"],
-            width=2
-        )
-
-        draw.rounded_rectangle(
-            (53, 630, WIDTH - 53, 1085),
-            radius=21,
-            outline=palette["edge"],
-            width=1
-        )
-
-        # Tafsir heading plaque: rabartafsir.ttf
-        draw.rounded_rectangle(
-            (175, 640, WIDTH - 175, 687),
-            radius=20,
-            fill=tuple(min(255, c + 12) for c in panel) + (235,),
-            outline=soft_gold,
-            width=1
-        )
-
+    # Bismillah appears only on ayah 1 of a surah, except Al-Fatiha
+    # (where it is already part of ayah 1) and At-Tawbah (surah 9).
+    surah_number = int(ayah.get("surah_number", 0) or 0)
+    ayah_number = int(ayah.get("ayah_number", 0) or 0)
+    verse_top = 165
+    if ayah_number == 1 and surah_number not in (1, 9):
+        bismillah = "بِسۡمِ ٱللَّهِ ٱلرَّحۡمَٰنِ ٱلرَّحِيمِ"
         draw.text(
-            (WIDTH // 2, 663),
-            shape_rtl("تەفسیری ئاسان"),
-            font=make_tafsir_font(27),
-            fill=gold,
+            (WIDTH // 2, 170),
+            bismillah,
+            font=make_font(30),
+            fill=(255, 220, 130, 255),
             anchor="mm",
             direction="rtl",
-            language="ar"
+            language="ar",
         )
+        verse_top = 220
 
-        # Decorative side markers
-        for x in (157, WIDTH - 157):
-            draw.ellipse(
-                (x - 3, 660, x + 3, 666),
-                fill=gold
-            )
-
-        # Tafsir body: rabartafsir.ttf
-        draw_rtl_block(
-            draw,
-            ayah["tafsir"],
-            700,
-            WIDTH - 120,
-            32,
-            white,
-            max_lines=45,
-            line_gap=4,
-            max_height=370,
-            use_quran_font=False
-        )
-
-        footer_y = 1120
-        brand_y = 1160
-        bottom_line_y = 1190
-    else:
-        # With no tafsir, leave the background transparent below the Quran panel.
-        footer_y = 1015
-        brand_y = 1060
-        bottom_line_y = 1090
-
-    # Footer separator
-    draw.line(
-        (95, footer_y, WIDTH - 95, footer_y),
-        fill=soft_gold,
-        width=1
+    # Quran text is directly over the background, with no backing shape.
+    draw_rtl_block(
+        draw,
+        ayah.get("arabic", ""),
+        verse_top,
+        WIDTH - 90,
+        39,
+        (255, 255, 255, 255),
+        max_lines=30,
+        line_gap=7,
+        max_height=370 if verse_top == 165 else 320,
+        use_quran_font=True,
     )
 
-    draw.polygon(
-        [
-            (WIDTH // 2, footer_y - 7),
-            (WIDTH // 2 + 7, footer_y),
-            (WIDTH // 2, footer_y + 7),
-            (WIDTH // 2 - 7, footer_y)
-        ],
-        fill=gold
-    )
-
-    # Brand footer: rabartafsir.ttf
+    # Tafsir text only; transparent background remains transparent.
     draw.text(
-        (WIDTH // 2, brand_y),
-        shape_rtl("قورئانی پیرۆز - ڕێگای ئیسلام"),
-        font=make_tafsir_font(23),
-        fill=gold,
+        (WIDTH // 2, 690),
+        shape_rtl("تەفسیری ئاسان"),
+        font=make_tafsir_font(27),
+        fill=(255, 220, 130, 255),
         anchor="mm",
         direction="rtl",
-        language="ar"
+        language="ar",
+    )
+    draw_rtl_block(
+        draw,
+        ayah.get("tafsir", ""),
+        735,
+        WIDTH - 100,
+        30,
+        (255, 255, 255, 255),
+        max_lines=45,
+        line_gap=6,
+        max_height=420,
+        use_quran_font=False,
     )
 
-    draw.line(
-        (220, bottom_line_y, WIDTH - 220, bottom_line_y),
-        fill=(65, 101, 85),
-        width=1
+    # Small footer, also text only.
+    draw.text(
+        (WIDTH // 2, 1215),
+        shape_rtl("قورئانی پیرۆز"),
+        font=make_tafsir_font(22),
+        fill=(255, 220, 130, 255),
+        anchor="mm",
+        direction="rtl",
+        language="ar",
     )
-
     image.save(image_path)
-
-
-# =========================
-# DOWNLOAD RECITATION AUDIO
-# =========================
+    return image_path
 
 def download_ayah_audio(ayah, audio_path):
     url = (
@@ -1047,7 +822,7 @@ def download_ayah_audio(ayah, audio_path):
 # BUILD VIDEO
 # =========================
 
-def create_video(include_tafsir=INCLUDE_TAFSIR):
+def create_video():
     os.makedirs(WORK_DIR, exist_ok=True)
 
     selected_ayahs = get_random_verses()
@@ -1068,7 +843,7 @@ def create_video(include_tafsir=INCLUDE_TAFSIR):
             WORK_DIR, "clip_" + str(index) + ".mp4"
         )
 
-        create_ayah_image(ayah, index, image_path, include_tafsir=include_tafsir)
+        create_ayah_image(ayah, index, image_path)
         download_ayah_audio(ayah, audio_path)
 
         run_command([
@@ -1148,7 +923,7 @@ def send_video(ayahs):
         + "–"
         + str(ayahs[-1]["ayah_number"])
         + "\n"
-        + ("تەفسیری ئاسان - ڕێگای ئیسلام" if INCLUDE_TAFSIR else "قورئانی پیرۆز - ڕێگای ئیسلام")
+        + "تەفسیری ئاسان - ڕێگای ئیسلام"
     )
 
     boundary = "----QuranVideoBoundary7MA4YWxkTrZu0gW"
@@ -1231,9 +1006,9 @@ def main():
             "نەدۆزرایەوە."
         )
 
-    print("Starting Quran video. Tafsir:", "ON" if INCLUDE_TAFSIR else "OFF")
+    print("Starting Quran tafsir video...")
 
-    selected_ayahs = create_video(include_tafsir=INCLUDE_TAFSIR)
+    selected_ayahs = create_video()
 
     print("Video created. Uploading to Telegram...")
 
