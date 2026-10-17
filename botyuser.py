@@ -52,6 +52,7 @@ BACKGROUND_PRESETS = {
     "mountains": {"name": "⛰️ شاخ و هەور", "file": "03_mountains.mp4"},
     "desert": {"name": "🏜️ بیابانی زێڕین", "file": "04_desert.mp4"},
     "night": {"name": "🌌 ئاسمانی شەو", "file": "05_night_sky.mp4"},
+    "islamic": {"name": "🕌 فانۆس و شاخی زێڕین (نوێ)", "file": "06_islamic_sunrise.mp4"},
 }
 BACKGROUND_DIR = os.path.join(BASE_DIR, "nature_backgrounds")
 
@@ -1020,6 +1021,7 @@ def ensure_background_video(background_key):
         "mountains": "0x37445A",
         "desert": "0xB28B52",
         "night": "0x161D31",
+        "islamic": "0x102B43",
     }
     log_error("Background file missing; generating fallback for " + background_key)
     run_ffmpeg([
@@ -1038,7 +1040,7 @@ def ensure_background_video(background_key):
 def keyboard_backgrounds():
     rows = [
         [{"text": BACKGROUND_PRESETS[key]["name"], "callback_data": "bg:" + key}]
-        for key in ("forest", "sea", "mountains", "desert", "night")
+        for key in ("islamic", "forest", "sea", "mountains", "desert", "night")
     ]
     rows.append([{"text": "📱 ڤیدیۆ لە گەلەریی مۆبایل", "callback_data": "bg:custom"}])
     return {"inline_keyboard": rows}
