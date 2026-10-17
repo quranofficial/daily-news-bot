@@ -698,7 +698,7 @@ def get_random_verses():
 # CREATE PREMIUM VERSE IMAGE
 # =========================
 
-def create_ayah_image(ayah, index, image_path, design=1):
+def create_ayah_image(ayah, index, image_path, design=1, transparent_background=False):
     # Five user-selectable palettes; layout and Quran text remain the same.
     palettes = {
         1: {"name": "زمردی و زێڕین", "top": (7, 29, 34), "bottom": (14, 48, 47), "gold": (218, 185, 111), "soft": (151, 127, 76), "white": (250, 247, 235), "muted": (206, 220, 213), "panel": (16, 43, 47), "edge": (65, 104, 91)},
@@ -708,13 +708,19 @@ def create_ayah_image(ayah, index, image_path, design=1):
         5: {"name": "ڕەش و سپی", "top": (15, 18, 22), "bottom": (38, 42, 47), "gold": (224, 226, 229), "soft": (142, 148, 155), "white": (255, 255, 255), "muted": (216, 220, 224), "panel": (25, 29, 34), "edge": (96, 103, 112)},
     }
     palette = palettes.get(int(design or 1), palettes[1])
-    image = Image.new("RGB", (WIDTH, HEIGHT), palette["top"])
+    if transparent_background:
+        # The bot places this transparent text/layout layer over a moving nature video.
+        image = Image.new("RGBA", (WIDTH, HEIGHT), (0, 0, 0, 0))
+    else:
+        image = Image.new("RGB", (WIDTH, HEIGHT), palette["top"])
+
     draw = ImageDraw.Draw(image)
 
-    for y in range(HEIGHT):
-        ratio = y / HEIGHT
-        color = tuple(int(a + (b - a) * ratio) for a, b in zip(palette["top"], palette["bottom"]))
-        draw.line((0, y, WIDTH, y), fill=color)
+    if not transparent_background:
+        for y in range(HEIGHT):
+            ratio = y / HEIGHT
+            color = tuple(int(a + (b - a) * ratio) for a, b in zip(palette["top"], palette["bottom"]))
+            draw.line((0, y, WIDTH, y), fill=color)
 
     gold = palette["gold"]
     soft_gold = palette["soft"]
