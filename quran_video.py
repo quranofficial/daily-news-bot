@@ -718,7 +718,8 @@ def create_text_overlay(ayah, index, image_path, include_tafsir=True, settings=N
     ayah_y = int(settings.get("ayah_y", 250))
     tafsir_y = int(settings.get("tafsir_y", 690))
     other_y = int(settings.get("other_y", 115))
-    if settings.get("show_header", True):
+    # Avoid duplicate Surah/ayah metadata: show it at the top OR at the bottom.
+    if settings.get("show_header", True) and not settings.get("show_footer_info", True):
         draw.text((WIDTH // 2, other_y), shape_rtl(str(ayah.get("surah_name", ""))),
                   font=make_font(other_size), fill=other_color, anchor="mm", direction="rtl", language="ar")
         if settings.get("show_ayah_number", True):
@@ -765,7 +766,7 @@ def create_text_overlay(ayah, index, image_path, include_tafsir=True, settings=N
             direction="rtl",
             language="ar",
         )
-        if settings.get("show_footer_info", True):
+        if settings.get("show_footer_info", True) and not settings.get("show_header", False):
             info_size = max(12, int(settings.get("other_size", 24)))
             surah_y = footer_y + 34
             ayah_y_footer = footer_y + 62
@@ -1087,7 +1088,7 @@ def create_ayah_image(ayah, index, image_path, design=1, include_tafsir=True, se
         language="ar"
     )
 
-    if settings.get("show_footer_info", True):
+    if settings.get("show_footer_info", True) and not settings.get("show_header", False):
         info_size = max(12, int(settings.get("other_size", 24)))
         draw.text(
             (WIDTH // 2, footer_surah_y),
