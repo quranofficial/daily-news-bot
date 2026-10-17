@@ -2,10 +2,16 @@
 name: Quran User Bot
 
 on:
+  schedule:
+    - cron: "17 * * * *"
   workflow_dispatch:
 
 permissions:
   contents: read
+
+concurrency:
+  group: quran-user-bot
+  cancel-in-progress: true
 
 jobs:
   run-bot:
