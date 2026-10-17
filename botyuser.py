@@ -1226,11 +1226,16 @@ def keyboard_backgrounds(kind):
 
 def keyboard_designs():
     names = [
-        ("🏛️ ١. کلاسیکی زێڕین", 1),
-        ("🪟 ٢. مۆدێرنی شەفاف", 2),
-        ("🕌 ٣. کەوانەی ئیسلامی", 3),
-        ("📜 ٤. نووسینی لایەنەکی", 4),
-        ("🌙 ٥. شاهانەی بازنەیی", 5),
+        ("🏔️ ١. شاخ و ئاویشار", 1),
+        ("🕌 ٢. کەوانەی مزگەوت", 2),
+        ("🌙 ٣. شەوی ئەستێردار", 3),
+        ("🏜️ ٤. خۆرئاوابوون", 4),
+        ("🌿 ٥. دارستانی سەوز", 5),
+        ("📜 ٦. پەڕەی کۆن", 6),
+        ("💎 ٧. کریستاڵی شەفاف", 7),
+        ("👑 ٨. شاهانەی زێڕین", 8),
+        ("🌌 ٩. ئاسمانی نیلی", 9),
+        ("🍁 ١٠. پاییزی زێڕین", 10),
     ]
     return {"inline_keyboard": [
         [{"text": name, "callback_data": "design:%d" % number}]
@@ -1272,7 +1277,7 @@ def create_selected_video(chat_id, design):
         ayahs = find_surah_rows(surah_number, start_ayah, end_ayah)
         surah = next(s for s in get_surahs() if int(s["number"]) == surah_number)
         reciter_name = RECITERS[reciter_id]["name"]
-        send_message(chat_id, "⏳ ڤیدیۆکەت دروست دەکەم...\n🎙️ قاری: %s\nسوورەت: %s\nئایەتەکان: %d–%d\n🎨 دیزاین: %d/5\nتکایە چاوەڕێ بکە." % (reciter_name, surah["name"], start_ayah, end_ayah, design))
+        send_message(chat_id, "⏳ ڤیدیۆکەت دروست دەکەم...\n🎙️ قاری: %s\nسوورەت: %s\nئایەتەکان: %d–%d\n🎨 دیزاین: %d/10\nتکایە چاوەڕێ بکە." % (reciter_name, surah["name"], start_ayah, end_ayah, design))
         video_path, job_dir = build_video(chat_id, ayahs, reciter_id, design=design, background_path=session.get("background_path"), background_kind=session.get("background_kind", "image"))
         send_video(chat_id, video_path, "قورئانی پیرۆز — %s\nقاری: %s\nئایەت %d–%d" % (surah["name"], reciter_name, start_ayah, end_ayah))
         send_message(chat_id, "✅ ڤیدیۆکە بە سەرکەوتوویی بۆ تۆ نێردرا.")
@@ -1527,7 +1532,7 @@ def handle_callback(callback):
 
         if data.startswith("design:"):
             design = int(data.split(":", 1)[1])
-            if design not in range(1, 6):
+            if design not in range(1, 11):
                 raise ValueError("دیزاینەکە دروست نییە.")
             answer_callback(callback_id, "دیزاین هەڵبژێردرا")
             create_selected_video(chat_id, design)
