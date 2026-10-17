@@ -45,6 +45,93 @@ TIMINGS_BASE_URL = (
 SESSIONS = {}
 _SURAH_CACHE = None
 
+# Per-user text preferences survive bot restarts and future video requests.
+USER_SETTINGS_PATH = os.path.join(BASE_DIR, "user_text_settings.json")
+REQUIRED_CHANNEL = "@Regayislam_1"
+REQUIRED_CHANNEL_URL = "https://t.me/Regayislam_1"
+DEFAULT_TEXT_SETTINGS = {
+    "plain_overlay": True,
+    "ayah_color": [255, 255, 255],
+    "tafsir_color": [255, 210, 90],
+    "other_color": [255, 255, 255],
+    "ayah_size": 44,
+    "tafsir_size": 30,
+    "other_size": 24,
+    "ayah_y": 250,
+    "tafsir_y": 690,
+    "other_y": 115,
+}
+
+
+def load_all_user_settings():
+    try:
+        with open(USER_SETTINGS_PATH, "r", encoding="utf-8") as f:
+            data = json.load(f)
+        return data if isinstance(data, dict) else {}
+    except FileNotFoundError:
+        return {}
+    except Exception as exc:
+        log_exception("Could not load user text settings", exc)
+        return {}
+
+
+def load_user_text_settings(chat_id):
+    all_settings = load_all_user_settings()
+    saved = all_settings.get(str(chat_id), {})
+    settings = dict(DEFAULT_TEXT_SETTINGS)
+    if isinstance(saved, dict):
+        settings.update(saved)
+    # JSON stores tuples as lists; quran_video accepts these sequences.
+    for key in ("ayah_color", "tafsir_color", "other_color"):
+        try:
+            settings[key] = [int(v) for v in settings[key]]
+        except Exception:
+            settings[key] = list(DEFAULT_TEXT_SETTINGS[key])
+    return settings
+
+
+def save_user_text_settings(chat_id, settings):
+    all_settings = load_all_user_settings()
+    clean = dict(DEFAULT_TEXT_SETTINGS)
+    clean.update(settings or {})
+    for key in ("ayah_color", "tafsir_color", "other_color"):
+        clean[key] = list(clean.get(key, DEFAULT_TEXT_SETTINGS[key]))
+    all_settings[str(chat_id)] = clean
+    temporary_path = USER_SETTINGS_PATH + ".tmp"
+    with open(temporary_path, "w", encoding="utf-8") as f:
+        json.dump(all_settings, f, ensure_ascii=False, indent=2)
+    os.replace(temporary_path, USER_SETTINGS_PATH)
+
+
+def keyboard_join_required():
+    return {"inline_keyboard": [
+        [{"text": "📢 چوونە ناو کەناڵ", "url": REQUIRED_CHANNEL_URL}],
+        [{"text": "✅ چوومە ناو کەناڵ — پشکنین", "callback_data": "join:check"}],
+    ]}
+
+
+def is_channel_member(chat_id):
+    try:
+        member = telegram("getChatMember", {
+            "chat_id": REQUIRED_CHANNEL,
+            "user_id": chat_id,
+        })
+        return member.get("status") in ("creator", "administrator", "member")
+    except Exception as exc:
+        log_exception("CHANNEL MEMBERSHIP CHECK FAILED | chat_id=%s" % chat_id, exc)
+        return False
+
+
+def send_join_required(chat_id):
+    send_message(
+        chat_id,
+        "🔒 بۆ بەکارهێنانی بۆتەکە، سەرەتا دەبێت ببیتە ئەندامی کەناڵەکەمان.\n\n"
+        "١. بچۆ ناو کەناڵەکە.\n"
+        "٢. پاشان دوگمەی «پشکنین» دابگرە.\n\n"
+        "ئەگەر دوای چوونە ناو کەناڵەکە هێشتا پەسەند نەکرا، تکایە دڵنیابە بۆتەکە لە کەناڵەکەدا ئەدمینە.",
+        keyboard_join_required(),
+    )
+
 
 # =========================
 # LOGGING
@@ -1353,6 +1440,11 @@ def create_selected_video(chat_id, design):
 def start(chat_id):
     log_error("START COMMAND | chat_id=%s" % chat_id)
 
+    if not is_channel_member(chat_id):
+        SESSIONS.pop(chat_id, None)
+        send_join_required(chat_id)
+        return
+
     SESSIONS[chat_id] = {"state": "reciter"}
 
     send_message(
@@ -1400,6 +1492,11 @@ def handle_message(message):
             "داواکارییەکەت هەڵوەشایەوە. "
             "بۆ دەستپێکردن /start بنووسە.",
         )
+        return
+
+    if not is_channel_member(chat_id):
+        SESSIONS.pop(chat_id, None)
+        send_join_required(chat_id)
         return
 
     session = SESSIONS.get(chat_id)
@@ -1547,6 +1644,21 @@ def handle_callback(callback):
         answer_callback(callback_id)
         return
 
+    if data == "join:check":
+        if is_channel_member(chat_id):
+            answer_callback(callback_id, "✅ ئەندامبوون پشتڕاست کرایەوە")
+            start(chat_id)
+        else:
+            answer_callback(callback_id, "هێشتا ئەندامبوون پشتڕاست نەکراوەتەوە")
+            send_join_required(chat_id)
+        return
+
+    if not is_channel_member(chat_id):
+        SESSIONS.pop(chat_id, None)
+        answer_callback(callback_id, "سەرەتا دەبێت ببیتە ئەندامی کەناڵەکە")
+        send_join_required(chat_id)
+        return
+
     try:
         if data.startswith("mode:"):
             kind = data.split(":", 1)[1]
@@ -1611,7 +1723,7 @@ def handle_callback(callback):
             if not session or session.get("state") != "tafsir_choice":
                 raise ValueError("تکایە /start دووبارە بکە.")
             session["include_tafsir"] = (choice == "on")
-            session["text_settings"] = {"plain_overlay": True, "ayah_color": (255,255,255), "tafsir_color": (255,210,90), "other_color": (255,255,255), "ayah_size": 44, "tafsir_size": 30, "other_size": 24, "ayah_y": 250, "tafsir_y": 690, "other_y": 115}
+            session["text_settings"] = load_user_text_settings(chat_id)
             session["state"] = "text_settings"
             answer_callback(callback_id, "هەڵبژێردرا")
             send_message(chat_id, "🎨 ڕێکخستنی دەق: ڕەنگ، قەبارە و شوێنی ئایەت و تەفسیر هەڵبژێرە. هیچ پەنجەرە و پاشبنەمای تایبەت بۆ دەقەکان نییە.", keyboard_text_settings())
@@ -1637,8 +1749,9 @@ def handle_callback(callback):
                 if len(value) != 3 or any(x < 0 or x > 255 for x in value): raise ValueError("ڕەنگی دروست نییە.")
             else:
                 value = int(raw)
-            session.setdefault("text_settings", {"plain_overlay": True})[setting] = value
-            answer_callback(callback_id, "ڕێکخستن هەڵگیرا")
+            session.setdefault("text_settings", load_user_text_settings(chat_id))[setting] = value
+            save_user_text_settings(chat_id, session["text_settings"])
+            answer_callback(callback_id, "ڕێکخستن هەڵگیرا و بۆ داهاتووش پاشەکەوت کرا")
             send_message(chat_id, "✅ ڕێکخستنەکە گۆڕدرا. دەتوانیت ڕێکخستنێکی تر هەڵبژێریت:", keyboard_text_settings())
             return
 
@@ -1651,8 +1764,9 @@ def handle_callback(callback):
             session = SESSIONS.get(chat_id)
             if not session or session.get("state") != "text_settings":
                 raise ValueError("تکایە /start دووبارە بکە.")
+            save_user_text_settings(chat_id, session.get("text_settings", load_user_text_settings(chat_id)))
             session["state"] = "design"
-            answer_callback(callback_id, "ڕێکخستنەکان هەڵگیرا")
+            answer_callback(callback_id, "ڕێکخستنەکان بۆ داهاتووش پاشەکەوت کران")
             send_message(chat_id, "🎨 دیزاینێک هەڵبژێرە:", keyboard_designs())
             return
 
