@@ -1041,7 +1041,7 @@ def run_ffmpeg(args):
         )
 
 
-def build_video(chat_id, ayahs, reciter_id, design=1, background_path=None, background_kind="image", darkness=0):
+def build_video(chat_id, ayahs, reciter_id, design=1, background_path=None, background_kind="image", darkness=0, include_tafsir=True, ayah_color="white", tafsir_color="white"):
     stamp = str(int(time.time()))
 
     job_dir = os.path.join(
@@ -1132,15 +1132,21 @@ def build_video(chat_id, ayahs, reciter_id, design=1, background_path=None, back
                 i,
                 image_path,
                 design=design,
+                include_tafsir=include_tafsir,
+                ayah_color=ayah_color,
+                tafsir_color=tafsir_color,
             )
 
             bg_path = background_path
-            if not bg_path or not os.path.isfile(bg_path):
+            if background_kind != "black" and (not bg_path or not os.path.isfile(bg_path)):
                 raise RuntimeError("Background ـی هەڵبژێردراو نەدۆزرایەوە.")
 
-            bg_input = (["-stream_loop", "-1", "-i", bg_path]
-                        if background_kind == "video"
-                        else ["-loop", "1", "-i", bg_path])
+            if background_kind == "black":
+                bg_input = ["-f", "lavfi", "-i", "color=c=black:s=720x1280:r=30:d=3600"]
+            elif background_kind == "video":
+                bg_input = ["-stream_loop", "-1", "-i", bg_path]
+            else:
+                bg_input = ["-loop", "1", "-i", bg_path]
             ffmpeg_args = ["ffmpeg", "-y"] + bg_input + [
                 "-loop", "1", "-i", image_path,
                 "-ss", "%.3f" % start_time,
@@ -1212,6 +1218,7 @@ def keyboard_output_modes():
     return {"inline_keyboard": [
         [{"text": "🖼️ ١. ڕسم", "callback_data": "mode:image"}],
         [{"text": "🎬 ٢. ڤیدیۆ", "callback_data": "mode:video"}],
+        [{"text": "⬛ ٣. پاشبنەمای ڕەش", "callback_data": "mode:black"}],
     ]}
 
 
@@ -1223,6 +1230,28 @@ def keyboard_backgrounds(kind):
                       "callback_data": "background:%s:%d" % (kind, number)}])
     rows.append([{"text": "📱 هەڵبژاردن لە گەلەری مۆبایل", "callback_data": "gallery:%s" % kind}])
     return {"inline_keyboard": rows}
+
+
+def keyboard_tafsir():
+    return {"inline_keyboard": [
+        [{"text": "📖 لەگەڵ تەفسیر", "callback_data": "tafsir:on"}],
+        [{"text": "🕋 تەنها ئایەت، بێ تەفسیر", "callback_data": "tafsir:off"}],
+    ]}
+
+def keyboard_text_color(which):
+    title = "ayahcolor" if which == "ayah" else "tafsircolor"
+    return {"inline_keyboard": [
+        [{"text": "⚪ سپی", "callback_data": title + ":white"},
+         {"text": "🟡 زەرد", "callback_data": title + ":yellow"}],
+        [{"text": "🟢 سەوز", "callback_data": title + ":green"},
+         {"text": "🔵 شین", "callback_data": title + ":blue"}],
+    ]}
+
+def prompt_text_color(chat_id, which):
+    session = SESSIONS[chat_id]
+    session["state"] = "ayah_color_choice" if which == "ayah" else "tafsir_color_choice"
+    text = "🎨 ڕەنگی دەقی ئایەت و بسم‌ڵا هەڵبژێرە:" if which == "ayah" else "🎨 ڕەنگی دەقی تەفسیر هەڵبژێرە:"
+    send_message(chat_id, text, keyboard_text_color(which))
 
 
 def prompt_darkness(chat_id):
@@ -1266,7 +1295,15 @@ def create_selected_video(chat_id, design):
         reciter_name = RECITERS[reciter_id]["name"]
         darkness = int(session.get("darkness", 0))
         send_message(chat_id, "⏳ ڤیدیۆکەت دروست دەکەم...\n🎙️ قاری: %s\nسوورەت: %s\nئایەتەکان: %d–%d\n🌑 تاریککردن: %d%%\nتکایە چاوەڕێ بکە." % (reciter_name, surah["name"], start_ayah, end_ayah, darkness))
-        video_path, job_dir = build_video(chat_id, ayahs, reciter_id, design=1, background_path=session.get("background_path"), background_kind=session.get("background_kind", "image"), darkness=darkness)
+        video_path, job_dir = build_video(
+            chat_id, ayahs, reciter_id, design=1,
+            background_path=session.get("background_path"),
+            background_kind=session.get("background_kind", "image"),
+            darkness=darkness,
+            include_tafsir=bool(session.get("include_tafsir", True)),
+            ayah_color=session.get("ayah_color", "white"),
+            tafsir_color=session.get("tafsir_color", "white"),
+        )
         send_video(chat_id, video_path, "قورئانی پیرۆز — %s\nقاری: %s\nئایەت %d–%d" % (surah["name"], reciter_name, start_ayah, end_ayah))
         send_message(chat_id, "✅ ڤیدیۆکە بە سەرکەوتوویی بۆ تۆ نێردرا.")
     except Exception as exc:
@@ -1373,7 +1410,8 @@ def handle_message(message):
             session["background_path"] = destination
             session["background_kind"] = mode
             send_message(chat_id, "✅ پاشبنەماکەت وەرگیرا.")
-            prompt_darkness(chat_id)
+            session["state"] = "tafsir_choice"
+            send_message(chat_id, "ئایا دەتەوێت تەفسیر لە ڤیدیۆکەدا دەرکەوێت؟", keyboard_tafsir())
         except Exception as exc:
             log_exception("CUSTOM BACKGROUND UPLOAD ERROR", exc)
             send_message(chat_id, "❌ نەمتوانی فایلەکە وەربگرم: " + str(exc))
@@ -1482,17 +1520,22 @@ def handle_callback(callback):
     try:
         if data.startswith("mode:"):
             kind = data.split(":", 1)[1]
-            if kind not in ("image", "video"):
+            if kind not in ("image", "video", "black"):
                 raise ValueError("جۆری پاشبنەما دروست نییە.")
             session = SESSIONS.get(chat_id)
             if not session or session.get("state") != "output_mode":
                 raise ValueError("تکایە /start دووبارە بکە.")
             session["background_kind"] = kind
-            session["state"] = "background_choice"
-            label = "وێنە" if kind == "image" else "ڤیدیۆ"
-            edit_message(chat_id, message_id, "⏳ پێشبینینی ٥ پاشبنەما دەنێرم...")
-            answer_callback(callback_id)
-            send_background_previews(chat_id, kind)
+            if kind == "black":
+                session["background_path"] = None
+                session["state"] = "tafsir_choice"
+                answer_callback(callback_id, "پاشبنەمای ڕەش هەڵبژێردرا")
+                send_message(chat_id, "ئایا دەتەوێت تەفسیر لە ڤیدیۆکەدا دەرکەوێت؟", keyboard_tafsir())
+            else:
+                session["state"] = "background_choice"
+                edit_message(chat_id, message_id, "⏳ پێشبینینی ٥ پاشبنەما دەنێرم...")
+                answer_callback(callback_id)
+                send_background_previews(chat_id, kind)
             return
 
         if data.startswith("gallery:"):
@@ -1524,9 +1567,48 @@ def handle_callback(callback):
                     raise RuntimeError("فایلی %d.%s لە GitHub نەدۆزرایەوە. دڵنیابە فایلەکە لە ڕەگی repository ـەکەت بارکراوە. %s" % (number, ext, exc))
             session["background_path"] = local_path
             session["background_kind"] = kind
-            session["state"] = "darkness"
+            session["state"] = "tafsir_choice"
             answer_callback(callback_id, "پاشبنەما هەڵبژێردرا")
-            send_message(chat_id, "✅ پاشبنەما هەڵبژێردرا.")
+            send_message(chat_id, "ئایا دەتەوێت تەفسیر لە ڤیدیۆکەدا دەرکەوێت؟", keyboard_tafsir())
+            return
+
+        if data.startswith("tafsir:"):
+            choice = data.split(":", 1)[1]
+            if choice not in ("on", "off"):
+                raise ValueError("هەڵبژاردەی تەفسیر دروست نییە.")
+            session = SESSIONS.get(chat_id)
+            if not session or session.get("state") != "tafsir_choice":
+                raise ValueError("تکایە /start دووبارە بکە.")
+            session["include_tafsir"] = (choice == "on")
+            answer_callback(callback_id, "هەڵبژێردرا")
+            prompt_text_color(chat_id, "ayah")
+            return
+
+        if data.startswith("ayahcolor:"):
+            color = data.split(":", 1)[1]
+            if color not in ("white", "yellow", "green", "blue"):
+                raise ValueError("ڕەنگی ئایەت دروست نییە.")
+            session = SESSIONS.get(chat_id)
+            if not session or session.get("state") != "ayah_color_choice":
+                raise ValueError("تکایە /start دووبارە بکە.")
+            session["ayah_color"] = color
+            answer_callback(callback_id, "ڕەنگی ئایەت هەڵبژێردرا")
+            if session.get("include_tafsir", True):
+                prompt_text_color(chat_id, "tafsir")
+            else:
+                session["tafsir_color"] = "white"
+                prompt_darkness(chat_id)
+            return
+
+        if data.startswith("tafsircolor:"):
+            color = data.split(":", 1)[1]
+            if color not in ("white", "yellow", "green", "blue"):
+                raise ValueError("ڕەنگی تەفسیر دروست نییە.")
+            session = SESSIONS.get(chat_id)
+            if not session or session.get("state") != "tafsir_color_choice":
+                raise ValueError("تکایە /start دووبارە بکە.")
+            session["tafsir_color"] = color
+            answer_callback(callback_id, "ڕەنگی تەفسیر هەڵبژێردرا")
             prompt_darkness(chat_id)
             return
 

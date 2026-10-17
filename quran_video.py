@@ -698,10 +698,19 @@ def get_random_verses():
 # CREATE PREMIUM VERSE IMAGE
 # =========================
 
-def create_ayah_image(ayah, index, image_path, design=1):
+def create_ayah_image(ayah, index, image_path, design=1, include_tafsir=True, ayah_color="white", tafsir_color="white"):
     """Create a transparent text-only overlay; the chosen background stays visible."""
     image = Image.new("RGBA", (WIDTH, HEIGHT), (0, 0, 0, 0))
     draw = ImageDraw.Draw(image)
+
+    color_map = {
+        "white": (255, 255, 255, 255),
+        "yellow": (255, 220, 130, 255),
+        "green": (150, 255, 170, 255),
+        "blue": (150, 205, 255, 255),
+    }
+    ayah_fill = color_map.get(str(ayah_color).lower(), color_map["white"])
+    tafsir_fill = color_map.get(str(tafsir_color).lower(), color_map["white"])
 
     # Header text only: no panels, cards, borders, or boxes.
     draw.text(
@@ -733,8 +742,8 @@ def create_ayah_image(ayah, index, image_path, design=1):
         draw.text(
             (WIDTH // 2, 170),
             bismillah,
-            font=make_font(30),
-            fill=(255, 220, 130, 255),
+            font=make_font(39),
+            fill=ayah_fill,
             anchor="mm",
             direction="rtl",
             language="ar",
@@ -748,7 +757,7 @@ def create_ayah_image(ayah, index, image_path, design=1):
         verse_top,
         WIDTH - 90,
         39,
-        (255, 255, 255, 255),
+        ayah_fill,
         max_lines=30,
         line_gap=7,
         max_height=370 if verse_top == 165 else 320,
@@ -756,27 +765,28 @@ def create_ayah_image(ayah, index, image_path, design=1):
     )
 
     # Tafsir text only; transparent background remains transparent.
-    draw.text(
-        (WIDTH // 2, 690),
-        shape_rtl("تەفسیری ئاسان"),
-        font=make_tafsir_font(27),
-        fill=(255, 220, 130, 255),
-        anchor="mm",
-        direction="rtl",
-        language="ar",
-    )
-    draw_rtl_block(
-        draw,
-        ayah.get("tafsir", ""),
-        735,
-        WIDTH - 100,
-        30,
-        (255, 255, 255, 255),
-        max_lines=45,
-        line_gap=6,
-        max_height=420,
-        use_quran_font=False,
-    )
+    if include_tafsir:
+        draw.text(
+            (WIDTH // 2, 690),
+            shape_rtl("تەفسیری ئاسان"),
+            font=make_tafsir_font(27),
+            fill=tafsir_fill,
+            anchor="mm",
+            direction="rtl",
+            language="ar",
+        )
+        draw_rtl_block(
+            draw,
+            ayah.get("tafsir", ""),
+            735,
+            WIDTH - 100,
+            30,
+            tafsir_fill,
+            max_lines=45,
+            line_gap=6,
+            max_height=420,
+            use_quran_font=False,
+        )
 
     # Small footer, also text only.
     draw.text(
