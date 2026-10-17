@@ -47,18 +47,11 @@ _SURAH_CACHE = None
 # Direct video-file links hosted by Wikimedia Commons. These avoid scraping
 # stock-video pages, which can return HTTP 403 to automated requests.
 BACKGROUND_PRESETS = {
-    "forest": {
-        "name": "🌿 دارستان و ئاویشار",
-        "url": "https://commons.wikimedia.org/wiki/Special:Redirect/file/Waterfall-1013185%2C_Dingle_Peninsula%2C_Co._Kerry%2C_Ireland.webm",
-    },
-    "sea": {
-        "name": "🌊 شەپۆلی دەریا",
-        "url": "https://commons.wikimedia.org/wiki/Special:Redirect/file/Ocean_waves_at_L%C3%A6kjavik_beach%2C_Iceland.webm",
-    },
-    "mountains": {
-        "name": "⛰️ شاخ و هەوری جوڵاو",
-        "url": "https://commons.wikimedia.org/wiki/Special:Redirect/file/A_multitude_of_mountain_wave_clouds_on_the_lee_of_the_Andes_%28CIRA_2019-07-16%29.webm",
-    },
+    "forest": {"name": "🌿 دارستانی سەوز", "file": "01_forest.mp4"},
+    "sea": {"name": "🌊 شەپۆلی دەریا", "file": "02_ocean.mp4"},
+    "mountains": {"name": "⛰️ شاخ و هەور", "file": "03_mountains.mp4"},
+    "desert": {"name": "🏜️ بیابانی زێڕین", "file": "04_desert.mp4"},
+    "night": {"name": "🌌 ئاسمانی شەو", "file": "05_night_sky.mp4"},
 }
 BACKGROUND_DIR = os.path.join(BASE_DIR, "nature_backgrounds")
 
@@ -1002,90 +995,53 @@ def find_surah_rows(surah_number, start_ayah, end_ayah):
 # =========================
 
 def ensure_background_video(background_key):
-    """Download and cache a nature video directly from Wikimedia Commons."""
+    """Use a repository background, a user-uploaded video, or local fallback."""
+    # Custom videos are passed in as an existing local path.
+    if isinstance(background_key, str) and os.path.isfile(background_key):
+        return background_key
+
     if background_key not in BACKGROUND_PRESETS:
         raise ValueError("Background ـی هەڵبژێردراو دروست نییە.")
 
     os.makedirs(BACKGROUND_DIR, exist_ok=True)
-    # WebM is supported by FFmpeg; using its own extension avoids mislabeling.
-    output_path = os.path.join(BACKGROUND_DIR, background_key + ".webm")
+    output_path = os.path.join(
+        BACKGROUND_DIR, BACKGROUND_PRESETS[background_key]["file"]
+    )
 
-    if os.path.isfile(output_path) and os.path.getsize(output_path) > 100_000:
+    # The five MP4 files are uploaded to GitHub with the bot, so no remote
+    # download (and no Wikimedia HTTP 429) is needed at runtime.
+    if os.path.isfile(output_path) and os.path.getsize(output_path) > 10_000:
         return output_path
 
-    video_url = BACKGROUND_PRESETS[background_key]["url"]
-    temp_path = output_path + ".part"
-    log_error("Downloading Commons background video=%s" % background_key)
-
-    try:
-        request = urllib.request.Request(
-            video_url,
-            headers={
-                # Identify the client clearly and accept the direct media file.
-                "User-Agent": "Mozilla/5.0 (compatible; QuranVideoBot/1.1; background downloader)",
-                "Accept": "video/webm,video/*;q=0.9,*/*;q=0.8",
-                "Connection": "close",
-            },
-        )
-        data = None
-        last_download_error = None
-        # Wikimedia may temporarily rate-limit shared hosting IPs (HTTP 429).
-        # Honor Retry-After when supplied and use a small exponential backoff.
-        for attempt in range(4):
-            try:
-                with urllib.request.urlopen(request, timeout=180) as response:
-                    data = response.read()
-                break
-            except urllib.error.HTTPError as http_error:
-                last_download_error = http_error
-                if http_error.code != 429 or attempt >= 3:
-                    raise
-                retry_after = http_error.headers.get("Retry-After", "")
-                try:
-                    wait_seconds = min(max(int(retry_after), 2), 60) if retry_after else (5 * (2 ** attempt))
-                except (TypeError, ValueError):
-                    wait_seconds = 5 * (2 ** attempt)
-                log_error("Background HTTP 429; retry %d/3 after %d seconds" % (attempt + 1, wait_seconds))
-                time.sleep(wait_seconds)
-        if data is None:
-            raise RuntimeError("داگرتنی Background دوای چەند هەوڵێک سەرکەوتوو نەبوو: " + str(last_download_error))
-
-        # WebM files begin with the EBML signature 1A 45 DF A3.
-        # Also allow MP4 in case Commons redirects to an MP4 transcode.
-        is_webm = data[:4] == b"\x1aE\xdf\xa3"
-        is_mp4 = len(data) >= 8 and data[4:8] == b"ftyp"
-        if len(data) < 100_000 or not (is_webm or is_mp4):
-            raise RuntimeError(
-                "سەرچاوەکە فایلێکی ڤیدیۆی دروستی نەگەڕاندەوە."
-            )
-
-        with open(temp_path, "wb") as f:
-            f.write(data)
-        os.replace(temp_path, output_path)
-        log_error(
-            "BACKGROUND READY | key=%s | bytes=%d"
-            % (background_key, len(data))
-        )
-        return output_path
-
-    except Exception as exc:
-        log_exception("Background download failed: " + background_key, exc)
-        try:
-            if os.path.exists(temp_path):
-                os.remove(temp_path)
-        except OSError:
-            pass
-        raise RuntimeError(
-            "نەتوانرا ڤیدیۆی Background دابەزێنرێت: " + str(exc)
-        )
-
+    # If a background file is missing, create a local animated fallback.
+    colors = {
+        "forest": "0x173D2A",
+        "sea": "0x104C68",
+        "mountains": "0x37445A",
+        "desert": "0xB28B52",
+        "night": "0x161D31",
+    }
+    log_error("Background file missing; generating fallback for " + background_key)
+    run_ffmpeg([
+        "ffmpeg", "-y",
+        "-f", "lavfi", "-i",
+        "color=c=%s:s=720x1280:r=25:d=12" % colors[background_key],
+        "-vf", "noise=alls=20:allf=t+u,hue=h='8*sin(t)':s=0.8,format=yuv420p",
+        "-an", "-c:v", "libx264", "-preset", "veryfast", "-crf", "27",
+        "-pix_fmt", "yuv420p", "-movflags", "+faststart", output_path,
+    ])
+    if not os.path.isfile(output_path) or os.path.getsize(output_path) < 10_000:
+        raise RuntimeError("Background ـی جێگرەوە دروست نەکرا.")
+    return output_path
 
 
 def keyboard_backgrounds():
-    return {"inline_keyboard": [
+    rows = [
         [{"text": BACKGROUND_PRESETS[key]["name"], "callback_data": "bg:" + key}]
-        for key in ("forest", "sea", "mountains")
-    ]}
+        for key in ("forest", "sea", "mountains", "desert", "night")
+    ]
+    rows.append([{"text": "📱 ڤیدیۆ لە گەلەریی مۆبایل", "callback_data": "bg:custom"}])
+    return {"inline_keyboard": rows}
 
 
 # =========================
@@ -1301,7 +1257,7 @@ def keyboard_designs():
 
 def create_selected_video(chat_id, design, background):
     session = SESSIONS.get(chat_id)
-    if not session or session.get("state") != "background":
+    if not session or session.get("state") not in ("background", "custom_background_ready"):
         send_message(chat_id, "داواکارییەکەت بەسەرچووە؛ /start بنووسە.")
         return
     job_dir = None
@@ -1313,7 +1269,13 @@ def create_selected_video(chat_id, design, background):
         ayahs = find_surah_rows(surah_number, start_ayah, end_ayah)
         surah = next(s for s in get_surahs() if int(s["number"]) == surah_number)
         reciter_name = RECITERS[reciter_id]["name"]
-        background_name = BACKGROUND_PRESETS[background]["name"]
+        if background == "custom":
+            background_name = "📱 ڤیدیۆی هەڵبژێردراو لە گەلەری"
+            background = session.get("custom_background_path", "")
+            if not background or not os.path.isfile(background):
+                raise RuntimeError("ڤیدیۆی هەڵبژێردراو لە مۆبایلەوە نەدۆزرایەوە؛ دووبارە بینێرە.")
+        else:
+            background_name = BACKGROUND_PRESETS[background]["name"]
         send_message(
             chat_id,
             "⏳ ڤیدیۆکەت دروست دەکەم...\n"
@@ -1360,6 +1322,37 @@ def start(chat_id):
     )
 
 
+def save_user_background_video(chat_id, file_id):
+    """Download a video that the user sends from their phone gallery."""
+    os.makedirs(BACKGROUND_DIR, exist_ok=True)
+    file_info = telegram("getFile", {"file_id": file_id})
+    remote_path = file_info.get("file_path")
+    if not remote_path:
+        raise RuntimeError("Telegram نەیتوانی شوێنی فایلەکە بدۆزێتەوە.")
+    url = "https://api.telegram.org/file/bot%s/%s" % (BOT_TOKEN, remote_path)
+    output_path = os.path.join(BACKGROUND_DIR, "user_%s.mp4" % str(chat_id))
+    request = urllib.request.Request(url, headers={"User-Agent": "QuranVideoBot/1.2"})
+    with urllib.request.urlopen(request, timeout=180) as response:
+        data = response.read()
+    if len(data) < 10_000:
+        raise RuntimeError("فایلی ڤیدیۆکە زۆر بچووکە یان دروست نییە.")
+    with open(output_path, "wb") as f:
+        f.write(data)
+    # Verify that FFmpeg can read the uploaded file.
+    proc = subprocess.run(
+        ["ffprobe", "-v", "error", "-show_entries", "format=duration",
+         "-of", "default=noprint_wrappers=1:nokey=1", output_path],
+        stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True,
+    )
+    if proc.returncode != 0:
+        try:
+            os.remove(output_path)
+        except OSError:
+            pass
+        raise RuntimeError("ئەم فایلە ڤیدیۆیەکی دروست نییە؛ MP4 یان MOV بنێرە.")
+    return output_path
+
+
 def handle_message(message):
     chat_id = message.get("chat", {}).get("id")
 
@@ -1400,6 +1393,28 @@ def handle_message(message):
         return
 
     session = SESSIONS.get(chat_id)
+
+    if session and session.get("state") == "custom_background_upload":
+        video = message.get("video")
+        document = message.get("document")
+        file_id = None
+        if video:
+            file_id = video.get("file_id")
+        elif document and str(document.get("mime_type", "")).startswith("video/"):
+            file_id = document.get("file_id")
+        if not file_id:
+            send_message(chat_id, "تکایە ڤیدیۆیەک لە گەلەری مۆبایلەکەت بنێرە (MP4 باشترە).")
+            return
+        try:
+            path = save_user_background_video(chat_id, file_id)
+            session["custom_background_path"] = path
+            session["state"] = "custom_background_ready"
+            send_message(chat_id, "✅ ڤیدیۆکە وەرگیرا. ئێستا ڤیدیۆی قورئان دروست دەکەم...")
+            create_selected_video(chat_id, int(session.get("design", 1)), "custom")
+        except Exception as exc:
+            log_exception("CUSTOM BACKGROUND UPLOAD FAILED", exc)
+            send_message(chat_id, "❌ نەتوانرا ڤیدیۆی گەلەری بەکاربهێنرێت. MP4 بنێرە.\n" + str(exc))
+        return
 
     if not session:
         send_message(
@@ -1515,12 +1530,17 @@ def handle_callback(callback):
 
         if data.startswith("bg:"):
             background = data.split(":", 1)[1]
-            if background not in BACKGROUND_PRESETS:
-                raise ValueError("Background ـەکە دروست نییە.")
             session = SESSIONS.get(chat_id)
             if not session or session.get("state") != "background":
                 answer_callback(callback_id, "تکایە /start بنووسە و دووبارە هەوڵ بدەوە.")
                 return
+            if background == "custom":
+                session["state"] = "custom_background_upload"
+                answer_callback(callback_id, "ڤیدیۆ لە گەلەری هەڵبژێرە")
+                send_message(chat_id, "📱 تکایە ڤیدیۆی دڵخوازت لە گەلەری مۆبایلەکەت وەک ڤیدیۆ بۆم بنێرە.\nMP4 باشترە؛ پاشان وەک Background بەکاری دەهێنم.")
+                return
+            if background not in BACKGROUND_PRESETS:
+                raise ValueError("Background ـەکە دروست نییە.")
             design = int(session.get("design", 1))
             answer_callback(callback_id, "Background هەڵبژێردرا")
             create_selected_video(chat_id, design, background)
