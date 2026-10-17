@@ -76,7 +76,7 @@ def default_text_settings():
         "ayah_y": 250,
         "tafsir_y": 690,
         "other_y": 115,
-        "show_header": True,
+        "show_header": False,
         "show_footer_info": True,
         "footer_text": "قورئانی پیرۆز - ڕێگای ئیسلام",
         "footer_size": 34,
@@ -95,6 +95,9 @@ def saved_text_settings(chat_id):
     # Keep the transparent text-only overlay so the selected background remains visible.
     settings["plain_overlay"] = True
     settings.setdefault("show_footer_info", True)
+    # Surah name and ayah number may appear at the top OR bottom, never both.
+    if settings.get("show_header", False) and settings.get("show_footer_info", True):
+        settings["show_header"] = False
     for key in ("ayah_color", "tafsir_color", "other_color"):
         value = settings.get(key)
         if isinstance(value, list):
@@ -1832,7 +1835,9 @@ def handle_callback(callback):
             if not session or session.get("state") != "text_settings":
                 raise ValueError("تکایە /start دووبارە بکە.")
             settings = session.setdefault("text_settings", default_text_settings())
-            settings["show_header"] = not settings.get("show_header", True)
+            settings["show_header"] = not settings.get("show_header", False)
+            if settings["show_header"]:
+                settings["show_footer_info"] = False
             save_text_settings(chat_id, settings)
             answer_callback(callback_id, "ڕێکخستن پاشەکەوت کرا")
             send_message(chat_id, "🎨 ڕێکخستنی دەق:", keyboard_text_settings(settings))
@@ -1844,6 +1849,8 @@ def handle_callback(callback):
                 raise ValueError("تکایە /start دووبارە بکە.")
             settings = session.setdefault("text_settings", default_text_settings())
             settings["show_footer_info"] = not settings.get("show_footer_info", True)
+            if settings["show_footer_info"]:
+                settings["show_header"] = False
             save_text_settings(chat_id, settings)
             answer_callback(callback_id, "ڕێکخستن پاشەکەوت کرا")
             send_message(chat_id, "🎨 ڕێکخستنی دەق:", keyboard_text_settings(settings))
