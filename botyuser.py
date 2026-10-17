@@ -36,8 +36,6 @@ BACKGROUND_DIR = BASE_DIR
 BACKGROUND_BASE_URL = "https://raw.githubusercontent.com/quranofficial/daily-news-bot/main/"
 RECITERS_JSON_PATH = os.path.join(BASE_DIR, "reciters.json")
 LOG_PATH = os.path.join(BASE_DIR, "bot_debug.log")
-USER_PREFS_PATH = os.path.join(BASE_DIR, "user_preferences.json")
-REQUIRED_CHANNEL = "@Regayislam_1"
 
 TIMINGS_BASE_URL = (
     "https://raw.githubusercontent.com/"
@@ -47,107 +45,92 @@ TIMINGS_BASE_URL = (
 SESSIONS = {}
 _SURAH_CACHE = None
 
+# Per-user text preferences survive bot restarts and future video requests.
+USER_SETTINGS_PATH = os.path.join(BASE_DIR, "user_text_settings.json")
+REQUIRED_CHANNEL = "@Regayislam_1"
+REQUIRED_CHANNEL_URL = "https://t.me/Regayislam_1"
+DEFAULT_TEXT_SETTINGS = {
+    "plain_overlay": True,
+    "ayah_color": [255, 255, 255],
+    "tafsir_color": [255, 210, 90],
+    "other_color": [255, 255, 255],
+    "ayah_size": 44,
+    "tafsir_size": 30,
+    "other_size": 24,
+    "ayah_y": 250,
+    "tafsir_y": 690,
+    "other_y": 115,
+}
 
-def load_user_preferences():
+
+def load_all_user_settings():
     try:
-        with open(USER_PREFS_PATH, "r", encoding="utf-8") as file:
-            data = json.load(file)
-            return data if isinstance(data, dict) else {}
-    except (OSError, ValueError):
+        with open(USER_SETTINGS_PATH, "r", encoding="utf-8") as f:
+            data = json.load(f)
+        return data if isinstance(data, dict) else {}
+    except FileNotFoundError:
+        return {}
+    except Exception as exc:
+        log_exception("Could not load user text settings", exc)
         return {}
 
 
-def save_user_preferences(data):
-    temp_path = USER_PREFS_PATH + ".tmp"
-    with open(temp_path, "w", encoding="utf-8") as file:
-        json.dump(data, file, ensure_ascii=False, indent=2)
-    os.replace(temp_path, USER_PREFS_PATH)
-
-
-def default_text_settings():
-    return {
-        "plain_overlay": False,
-        "ayah_color": [255, 255, 255],
-        "tafsir_color": [255, 210, 90],
-        "other_color": [255, 255, 255],
-        "ayah_size": 44,
-        "tafsir_size": 30,
-        "other_size": 24,
-        "ayah_y": 250,
-        "tafsir_y": 690,
-        "other_y": 115,
-        "show_header": True,
-        "footer_text": "قورئانی پیرۆز - ڕێگای ئیسلام",
-        "footer_size": 29,
-    }
-
-
-def user_preferences(chat_id):
-    all_prefs = load_user_preferences()
-    return all_prefs.setdefault(str(chat_id), {})
-
-
-def saved_text_settings(chat_id):
-    prefs = user_preferences(chat_id)
-    settings = default_text_settings()
-    settings.update(prefs.get("text_settings", {}))
-    # Keep the ten real design templates enabled; old preference files may have plain_overlay=True.
-    settings["plain_overlay"] = False
+def load_user_text_settings(chat_id):
+    all_settings = load_all_user_settings()
+    saved = all_settings.get(str(chat_id), {})
+    settings = dict(DEFAULT_TEXT_SETTINGS)
+    if isinstance(saved, dict):
+        settings.update(saved)
+    # JSON stores tuples as lists; quran_video accepts these sequences.
     for key in ("ayah_color", "tafsir_color", "other_color"):
-        value = settings.get(key)
-        if isinstance(value, list):
-            settings[key] = tuple(value)
+        try:
+            settings[key] = [int(v) for v in settings[key]]
+        except Exception:
+            settings[key] = list(DEFAULT_TEXT_SETTINGS[key])
     return settings
 
 
-def save_text_settings(chat_id, settings):
-    all_prefs = load_user_preferences()
-    key = str(chat_id)
-    prefs = all_prefs.setdefault(key, {})
-    serializable = dict(settings)
-    for color_key in ("ayah_color", "tafsir_color", "other_color"):
-        value = serializable.get(color_key)
-        if isinstance(value, tuple):
-            serializable[color_key] = list(value)
-    prefs["text_settings"] = serializable
-    save_user_preferences(all_prefs)
+def save_user_text_settings(chat_id, settings):
+    all_settings = load_all_user_settings()
+    clean = dict(DEFAULT_TEXT_SETTINGS)
+    clean.update(settings or {})
+    for key in ("ayah_color", "tafsir_color", "other_color"):
+        clean[key] = list(clean.get(key, DEFAULT_TEXT_SETTINGS[key]))
+    all_settings[str(chat_id)] = clean
+    temporary_path = USER_SETTINGS_PATH + ".tmp"
+    with open(temporary_path, "w", encoding="utf-8") as f:
+        json.dump(all_settings, f, ensure_ascii=False, indent=2)
+    os.replace(temporary_path, USER_SETTINGS_PATH)
 
 
-def is_channel_member(user_id):
-    """Telegram can reliably check membership when the bot is an admin in the channel."""
-    try:
-        member = telegram("getChatMember", {
-            "chat_id": REQUIRED_CHANNEL,
-            "user_id": user_id,
-        })
-        status = member.get("status", "")
-        return status in ("creator", "administrator", "member") or (
-            status == "restricted" and bool(member.get("is_member"))
-        )
-    except Exception as exc:
-        log_error("CHANNEL MEMBERSHIP CHECK FAILED | %r" % exc)
-        return False
-
-
-def keyboard_join_channel():
+def keyboard_join_required():
     return {"inline_keyboard": [
-        [{"text": "📢 چوونە ناو کەناڵ", "url": "https://t.me/Regayislam_1"}],
-        [{"text": "✅ پشکنین", "callback_data": "join:check"}],
+        [{"text": "📢 چوونە ناو کەناڵ", "url": REQUIRED_CHANNEL_URL}],
+        [{"text": "✅ چوومە ناو کەناڵ — پشکنین", "callback_data": "join:check"}],
     ]}
 
 
-def require_channel_membership(chat_id, user_id=None):
-    user_id = chat_id if user_id is None else user_id
-    if is_channel_member(user_id):
-        return True
+def is_channel_member(chat_id):
+    try:
+        member = telegram("getChatMember", {
+            "chat_id": REQUIRED_CHANNEL,
+            "user_id": chat_id,
+        })
+        return member.get("status") in ("creator", "administrator", "member")
+    except Exception as exc:
+        log_exception("CHANNEL MEMBERSHIP CHECK FAILED | chat_id=%s" % chat_id, exc)
+        return False
+
+
+def send_join_required(chat_id):
     send_message(
         chat_id,
         "🔒 بۆ بەکارهێنانی بۆتەکە، سەرەتا دەبێت ببیتە ئەندامی کەناڵەکەمان.\n\n"
         "١. بچۆ ناو کەناڵەکە.\n"
-        "٢. پاشان دوگمەی «پشکنین» دابگرە.",
-        keyboard_join_channel(),
+        "٢. پاشان دوگمەی «پشکنین» دابگرە.\n\n"
+        "ئەگەر دوای چوونە ناو کەناڵەکە هێشتا پەسەند نەکرا، تکایە دڵنیابە بۆتەکە لە کەناڵەکەدا ئەدمینە.",
+        keyboard_join_required(),
     )
-    return False
 
 
 # =========================
@@ -455,7 +438,7 @@ def send_photo(chat_id, path, caption):
 
 
 def send_background_previews(chat_id, kind):
-    """Send previews only on first visit, unless the user explicitly asks again."""
+    """Send the five GitHub background previews, then show selection buttons."""
     ext = "png" if kind == "image" else "mp4"
     for number in range(1, 6):
         local_path = os.path.join(BACKGROUND_DIR, "%d.%s" % (number, ext))
@@ -474,11 +457,7 @@ def send_background_previews(chat_id, kind):
         except Exception as exc:
             log_exception("BACKGROUND PREVIEW SEND FAILED", exc)
             send_message(chat_id, "نەتوانرا پێشبینینی فایل %d بنێردرێت." % number)
-    all_prefs = load_user_preferences()
-    prefs = all_prefs.setdefault(str(chat_id), {})
-    prefs["previews_seen_" + kind] = True
-    save_user_preferences(all_prefs)
-    send_message(chat_id, "⬇️ ژمارەی پاشبنەما هەڵبژێرە. ئەگەر پێویست بوو دەتوانیت پێشبینینەکان دووبارە ببینیت:", keyboard_backgrounds(kind))
+    send_message(chat_id, "⬇️ ئێستا ژمارەی ئەو پاشبنەمایە هەڵبژێرە کە دەتەوێت، یان لە گەلەری مۆبایل هەڵیبژێرە:", keyboard_backgrounds(kind))
 
 
 # =========================
@@ -1335,7 +1314,6 @@ def keyboard_backgrounds(kind):
         rows.append([{"text": "%s %d" % ("🖼️" if kind == "image" else "🎬", number),
                       "callback_data": "background:%s:%d" % (kind, number)}])
     rows.append([{"text": "📱 هەڵبژاردن لە گەلەری مۆبایل", "callback_data": "gallery:%s" % kind}])
-    rows.append([{"text": "👁️ دووبارە پیشاندانی ٥ پاشبنەما", "callback_data": "previews:%s" % kind}])
     return {"inline_keyboard": rows}
 
 
@@ -1347,58 +1325,26 @@ def keyboard_tafsir():
 
 
 
-def color_label(value):
-    colors = {
-        (255, 255, 255): "سپی",
-        (255, 210, 90): "زەرد",
-        (130, 255, 170): "سەوز",
-        (130, 200, 255): "شین",
-        (255, 145, 190): "پەمەیی",
-        (205, 160, 255): "مۆر",
-        (255, 165, 80): "پرتەقاڵی",
-        (100, 240, 230): "فیرووزەیی",
-        (255, 90, 90): "سوور",
-        (190, 220, 120): "زەیتوونی",
-        (230, 230, 230): "خۆڵەمێشی ڕوون",
-        (20, 20, 20): "ڕەش",
-    }
-    return colors.get(tuple(value) if isinstance(value, (list, tuple)) else value, "تایبەت")
-
-
-def keyboard_text_settings(settings=None):
-    settings = settings or default_text_settings()
-    header_label = "پیشاندانی" if settings.get("show_header", True) else "شاردنەوەی"
+def keyboard_text_settings():
     return {"inline_keyboard": [
-        [{"text": "🎨 ڕەنگی ئایەت: " + color_label(settings.get("ayah_color", (255,255,255))), "callback_data": "setting:ayah_color"},
-         {"text": "🟡 ڕەنگی تەفسیر: " + color_label(settings.get("tafsir_color", (255,210,90))), "callback_data": "setting:tafsir_color"}],
+        [{"text": "🎨 ڕەنگی ئایەت: سپی", "callback_data": "setting:ayah_color"},
+         {"text": "🟡 ڕەنگی تەفسیر: زەرد", "callback_data": "setting:tafsir_color"}],
         [{"text": "🔠 قەبارەی ئایەت", "callback_data": "setting:ayah_size"},
          {"text": "🔡 قەبارەی تەفسیر", "callback_data": "setting:tafsir_size"}],
-        [{"text": "📝 قەبارەی ناو و ژمارە", "callback_data": "setting:other_size"},
-         {"text": "🔎 قەبارەی دەقی خوارەوە", "callback_data": "setting:footer_size"}],
+        [{"text": "📝 قەبارەی ناو و ژمارە", "callback_data": "setting:other_size"}],
         [{"text": "⬆️ شوێنی ئایەت", "callback_data": "setting:ayah_y"},
          {"text": "⬇️ شوێنی تەفسیر", "callback_data": "setting:tafsir_y"}],
-        [{"text": "👁️ " + header_label + " ناوی سوورەت و ژمارەی ئایەت", "callback_data": "toggle_header"}],
-        [{"text": "✍️ گۆڕینی دەقی خوارەوە", "callback_data": "footer_text"}],
-        [{"text": "✅ تەواوە، بەردەوام بە", "callback_data": "settings:done"}],
+        [{"text": "✅ تەواوە، دروستکردنی ڤیدیۆ", "callback_data": "settings:done"}],
     ]}
 
 
 def keyboard_setting_values(setting):
-    colors = [
-        ("سپی", (255,255,255)), ("زەرد", (255,210,90)),
-        ("سەوز", (130,255,170)), ("شین", (130,200,255)),
-        ("پەمەیی", (255,145,190)), ("مۆر", (205,160,255)),
-        ("پرتەقاڵی", (255,165,80)), ("فیرووزەیی", (100,240,230)),
-        ("سوور", (255,90,90)), ("زەیتوونی", (190,220,120)),
-        ("خۆڵەمێشی ڕوون", (230,230,230)), ("ڕەش", (20,20,20)),
-    ]
     choices = {
-        "ayah_color": colors,
-        "tafsir_color": colors,
+        "ayah_color": [("سپی", (255,255,255)), ("زەرد", (255,210,90)), ("سەوز", (130,255,170)), ("شین", (130,200,255))],
+        "tafsir_color": [("زەرد", (255,210,90)), ("سپی", (255,255,255)), ("سەوز", (130,255,170)), ("شین", (130,200,255))],
         "ayah_size": [("بچووک", 34), ("مامناوەند", 44), ("گەورە", 54), ("زۆر گەورە", 62)],
         "tafsir_size": [("بچووک", 22), ("مامناوەند", 30), ("گەورە", 36), ("زۆر گەورە", 42)],
         "other_size": [("بچووک", 18), ("مامناوەند", 24), ("گەورە", 30), ("زۆر گەورە", 36)],
-        "footer_size": [("بچووک", 22), ("مامناوەند", 29), ("گەورە", 34), ("زۆر گەورە", 40)],
         "ayah_y": [("سەرەوە", 190), ("ناوەڕاست", 300), ("خوارەوە", 420)],
         "tafsir_y": [("ناوەڕاست", 600), ("خوارەوە", 730), ("زۆر خوارەوە", 830)],
     }
@@ -1411,8 +1357,22 @@ def keyboard_setting_values(setting):
 
 
 def keyboard_designs():
-    # دیزاینەکان لە کیبۆرددا نیشان نادرێن؛ دیزاینی بنەڕەتی بەکاردێت.
-    return None
+    names = [
+        ("🏔️ ١. شاخ و ئاویشار", 1),
+        ("🕌 ٢. کەوانەی مزگەوت", 2),
+        ("🌙 ٣. شەوی ئەستێردار", 3),
+        ("🏜️ ٤. خۆرئاوابوون", 4),
+        ("🌿 ٥. دارستانی سەوز", 5),
+        ("📜 ٦. پەڕەی کۆن", 6),
+        ("💎 ٧. کریستاڵی شەفاف", 7),
+        ("👑 ٨. شاهانەی زێڕین", 8),
+        ("🌌 ٩. ئاسمانی نیلی", 9),
+        ("🍁 ١٠. پاییزی زێڕین", 10),
+    ]
+    return {"inline_keyboard": [
+        [{"text": name, "callback_data": "design:%d" % number}]
+        for name, number in names
+    ]}
 
 
 def download_telegram_file(file_id, destination):
@@ -1430,21 +1390,9 @@ def download_telegram_file(file_id, destination):
 
 
 def prompt_design(chat_id):
-    # لیستی ١٠ دیزاین لابراوە؛ ڕاستەوخۆ بڕۆ بۆ ڕێکخستنی Darkness.
     session = SESSIONS[chat_id]
-    session["selected_design"] = 1
-    if session.get("background_kind", "image") in ("image", "video"):
-        session["state"] = "darkness"
-        send_message(
-            chat_id,
-            "🌑 ڕێژەی تاریککردنی پاشبنەما بنووسە لە 0 تا 100.\n\n"
-            "0 = تاریککردن نییە\n25 = کەم\n50 = مامناوەند\n"
-            "75 = زۆر\n100 = تەواو تاریک",
-        )
-    else:
-        session["background_darkness"] = 0
-        session["state"] = "design"
-        create_selected_video(chat_id, 1)
+    session["state"] = "design"
+    send_message(chat_id, "🎨 ئێستا یەکێک لە ١٠ دیزاینەکە هەڵبژێرە:", keyboard_designs())
 
 
 def create_selected_video(chat_id, design):
@@ -1489,12 +1437,15 @@ def create_selected_video(chat_id, design):
 # BOT COMMANDS
 # =========================
 
-def start(chat_id, user_id=None):
+def start(chat_id):
     log_error("START COMMAND | chat_id=%s" % chat_id)
-    if not require_channel_membership(chat_id, user_id):
+
+    if not is_channel_member(chat_id):
+        SESSIONS.pop(chat_id, None)
+        send_join_required(chat_id)
         return
 
-    SESSIONS[chat_id] = {"state": "reciter", "text_settings": saved_text_settings(chat_id)}
+    SESSIONS[chat_id] = {"state": "reciter"}
 
     send_message(
         chat_id,
@@ -1518,10 +1469,7 @@ def handle_message(message):
     )
 
     if text.startswith("/start"):
-        start(chat_id, message.get("from", {}).get("id", chat_id))
-        return
-
-    if not require_channel_membership(chat_id, message.get("from", {}).get("id", chat_id)):
+        start(chat_id)
         return
 
     if text.startswith("/help"):
@@ -1544,6 +1492,11 @@ def handle_message(message):
             "داواکارییەکەت هەڵوەشایەوە. "
             "بۆ دەستپێکردن /start بنووسە.",
         )
+        return
+
+    if not is_channel_member(chat_id):
+        SESSIONS.pop(chat_id, None)
+        send_join_required(chat_id)
         return
 
     session = SESSIONS.get(chat_id)
@@ -1590,18 +1543,6 @@ def handle_message(message):
 
     if message.get("photo") or message.get("video"):
         send_message(chat_id, "بۆ بەکارهێنانی گەلەری، سەرەتا /start بنووسە و قۆناغەکان تەواو بکە.")
-        return
-
-    if session.get("state") == "footer_text":
-        footer = text.strip()
-        if not footer or len(footer) > 100:
-            send_message(chat_id, "تکایە دەقێکی نەنەخشاو و لە 100 پیت کەمتر بنووسە.")
-            return
-        settings = session.setdefault("text_settings", saved_text_settings(chat_id))
-        settings["footer_text"] = footer
-        session["state"] = "text_settings"
-        save_text_settings(chat_id, settings)
-        send_message(chat_id, "✅ دەقی خوارەوە گۆڕدرا و پاشەکەوت کرا.", keyboard_text_settings(settings))
         return
 
     if session.get("state") == "darkness":
@@ -1703,28 +1644,22 @@ def handle_callback(callback):
         answer_callback(callback_id)
         return
 
+    if data == "join:check":
+        if is_channel_member(chat_id):
+            answer_callback(callback_id, "✅ ئەندامبوون پشتڕاست کرایەوە")
+            start(chat_id)
+        else:
+            answer_callback(callback_id, "هێشتا ئەندامبوون پشتڕاست نەکراوەتەوە")
+            send_join_required(chat_id)
+        return
+
+    if not is_channel_member(chat_id):
+        SESSIONS.pop(chat_id, None)
+        answer_callback(callback_id, "سەرەتا دەبێت ببیتە ئەندامی کەناڵەکە")
+        send_join_required(chat_id)
+        return
+
     try:
-        if data == "join:check":
-            user_id = callback.get("from", {}).get("id", chat_id)
-            if require_channel_membership(chat_id, user_id):
-                answer_callback(callback_id, "سوپاس، ئەندامبوون پشتڕاست کرایەوە")
-                start(chat_id, user_id)
-            else:
-                answer_callback(callback_id, "سەرەتا ببە ئەندامی کەناڵەکە")
-            return
-
-        if not require_channel_membership(chat_id, callback.get("from", {}).get("id", chat_id)):
-            answer_callback(callback_id, "سەرەتا ببە ئەندامی کەناڵەکە")
-            return
-
-        if data.startswith("previews:"):
-            kind = data.split(":", 1)[1]
-            if kind not in ("image", "video"):
-                raise ValueError("جۆری پاشبنەما دروست نییە.")
-            answer_callback(callback_id, "پێشبینینەکان دەنێردرێن")
-            send_background_previews(chat_id, kind)
-            return
-
         if data.startswith("mode:"):
             kind = data.split(":", 1)[1]
             if kind not in ("image", "video", "black"):
@@ -1741,13 +1676,9 @@ def handle_callback(callback):
                 send_message(chat_id, "ئایا دەتەوێت تەفسیر لە ڤیدیۆکەدا دەرکەوێت؟", keyboard_tafsir())
                 return
             session["state"] = "background_choice"
+            edit_message(chat_id, message_id, "⏳ پێشبینینی ٥ پاشبنەما دەنێرم...")
             answer_callback(callback_id)
-            prefs = user_preferences(chat_id)
-            if prefs.get("previews_seen_" + kind):
-                send_message(chat_id, "⬇️ ژمارەی پاشبنەما هەڵبژێرە:", keyboard_backgrounds(kind))
-            else:
-                edit_message(chat_id, message_id, "⏳ پێشبینینی ٥ پاشبنەما بۆ یەکەم جار دەنێردرێن...")
-                send_background_previews(chat_id, kind)
+            send_background_previews(chat_id, kind)
             return
 
         if data.startswith("gallery:"):
@@ -1792,10 +1723,10 @@ def handle_callback(callback):
             if not session or session.get("state") != "tafsir_choice":
                 raise ValueError("تکایە /start دووبارە بکە.")
             session["include_tafsir"] = (choice == "on")
-            session["text_settings"] = saved_text_settings(chat_id)
+            session["text_settings"] = load_user_text_settings(chat_id)
             session["state"] = "text_settings"
             answer_callback(callback_id, "هەڵبژێردرا")
-            send_message(chat_id, "🎨 ڕێکخستنی دەق: ڕەنگ، قەبارە، پیشاندانی ناو و ژمارە، و دەقی خوارەوە دیاری بکە. ڕێکخستنەکان پاشەکەوت دەکرێن.", keyboard_text_settings(session["text_settings"]))
+            send_message(chat_id, "🎨 ڕێکخستنی دەق: ڕەنگ، قەبارە و شوێنی ئایەت و تەفسیر هەڵبژێرە. هیچ پەنجەرە و پاشبنەمای تایبەت بۆ دەقەکان نییە.", keyboard_text_settings())
             return
 
         if data.startswith("setting:"):
@@ -1810,7 +1741,7 @@ def handle_callback(callback):
         if data.startswith("setval:"):
             _, setting, raw = data.split(":", 2)
             session = SESSIONS.get(chat_id)
-            allowed = {"ayah_color", "tafsir_color", "ayah_size", "tafsir_size", "other_size", "ayah_y", "tafsir_y", "footer_size"}
+            allowed = {"ayah_color", "tafsir_color", "ayah_size", "tafsir_size", "other_size", "ayah_y", "tafsir_y"}
             if not session or session.get("state") != "text_settings" or setting not in allowed:
                 raise ValueError("ڕێکخستنەکە دروست نییە.")
             if setting.endswith("color"):
@@ -1818,45 +1749,36 @@ def handle_callback(callback):
                 if len(value) != 3 or any(x < 0 or x > 255 for x in value): raise ValueError("ڕەنگی دروست نییە.")
             else:
                 value = int(raw)
-            session.setdefault("text_settings", default_text_settings())[setting] = value
-            save_text_settings(chat_id, session["text_settings"])
-            answer_callback(callback_id, "ڕێکخستن هەڵگیرا")
-            send_message(chat_id, "✅ ڕێکخستنەکە گۆڕدرا و پاشەکەوت کرا. دەتوانیت ڕێکخستنێکی تر هەڵبژێریت:", keyboard_text_settings(session["text_settings"]))
-            return
-
-        if data == "toggle_header":
-            session = SESSIONS.get(chat_id)
-            if not session or session.get("state") != "text_settings":
-                raise ValueError("تکایە /start دووبارە بکە.")
-            settings = session.setdefault("text_settings", default_text_settings())
-            settings["show_header"] = not settings.get("show_header", True)
-            save_text_settings(chat_id, settings)
-            answer_callback(callback_id, "ڕێکخستن پاشەکەوت کرا")
-            send_message(chat_id, "🎨 ڕێکخستنی دەق:", keyboard_text_settings(settings))
-            return
-
-        if data == "footer_text":
-            session = SESSIONS.get(chat_id)
-            if not session or session.get("state") != "text_settings":
-                raise ValueError("تکایە /start دووبارە بکە.")
-            session["state"] = "footer_text"
-            answer_callback(callback_id)
-            send_message(chat_id, "✍️ دەقی دڵخوازت بۆ خوارەوە بنووسە (تا 100 پیت). بۆ نموونە: قورئانی پیرۆز - ڕێگای ئیسلام")
+            session.setdefault("text_settings", load_user_text_settings(chat_id))[setting] = value
+            save_user_text_settings(chat_id, session["text_settings"])
+            answer_callback(callback_id, "ڕێکخستن هەڵگیرا و بۆ داهاتووش پاشەکەوت کرا")
+            send_message(chat_id, "✅ ڕێکخستنەکە گۆڕدرا. دەتوانیت ڕێکخستنێکی تر هەڵبژێریت:", keyboard_text_settings())
             return
 
         if data == "settings:back":
             answer_callback(callback_id)
-            session = SESSIONS.get(chat_id)
-            send_message(chat_id, "🎨 ڕێکخستنی دەق:", keyboard_text_settings((session or {}).get("text_settings", saved_text_settings(chat_id))))
+            send_message(chat_id, "🎨 ڕێکخستنی دەق:", keyboard_text_settings())
             return
 
         if data == "settings:done":
             session = SESSIONS.get(chat_id)
             if not session or session.get("state") != "text_settings":
                 raise ValueError("تکایە /start دووبارە بکە.")
-            save_text_settings(chat_id, session.get("text_settings", default_text_settings()))
-            session["selected_design"] = 1
-            answer_callback(callback_id, "ڕێکخستنەکان هەڵگیرا")
+            save_user_text_settings(chat_id, session.get("text_settings", load_user_text_settings(chat_id)))
+            session["state"] = "design"
+            answer_callback(callback_id, "ڕێکخستنەکان بۆ داهاتووش پاشەکەوت کران")
+            send_message(chat_id, "🎨 دیزاینێک هەڵبژێرە:", keyboard_designs())
+            return
+
+        if data.startswith("design:"):
+            design = int(data.split(":", 1)[1])
+            if design not in range(1, 11):
+                raise ValueError("دیزاینەکە دروست نییە.")
+            session = SESSIONS.get(chat_id)
+            if not session or session.get("state") != "design":
+                raise ValueError("تکایە /start دووبارە بکە.")
+            session["selected_design"] = design
+            answer_callback(callback_id, "دیزاین هەڵبژێردرا")
             if session.get("background_kind", "image") in ("image", "video"):
                 session["state"] = "darkness"
                 send_message(
@@ -1867,8 +1789,7 @@ def handle_callback(callback):
                 )
             else:
                 session["background_darkness"] = 0
-                session["state"] = "design"
-                create_selected_video(chat_id, 1)
+                create_selected_video(chat_id, design)
             return
 
         if data == "change_reciter":
