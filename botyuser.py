@@ -1021,12 +1021,34 @@ def ensure_background_video(background_key):
         request = urllib.request.Request(
             video_url,
             headers={
-                "User-Agent": "QuranVideoBot/1.0 (nature background downloader)",
+                # Identify the client clearly and accept the direct media file.
+                "User-Agent": "Mozilla/5.0 (compatible; QuranVideoBot/1.1; background downloader)",
                 "Accept": "video/webm,video/*;q=0.9,*/*;q=0.8",
+                "Connection": "close",
             },
         )
-        with urllib.request.urlopen(request, timeout=180) as response:
-            data = response.read()
+        data = None
+        last_download_error = None
+        # Wikimedia may temporarily rate-limit shared hosting IPs (HTTP 429).
+        # Honor Retry-After when supplied and use a small exponential backoff.
+        for attempt in range(4):
+            try:
+                with urllib.request.urlopen(request, timeout=180) as response:
+                    data = response.read()
+                break
+            except urllib.error.HTTPError as http_error:
+                last_download_error = http_error
+                if http_error.code != 429 or attempt >= 3:
+                    raise
+                retry_after = http_error.headers.get("Retry-After", "")
+                try:
+                    wait_seconds = min(max(int(retry_after), 2), 60) if retry_after else (5 * (2 ** attempt))
+                except (TypeError, ValueError):
+                    wait_seconds = 5 * (2 ** attempt)
+                log_error("Background HTTP 429; retry %d/3 after %d seconds" % (attempt + 1, wait_seconds))
+                time.sleep(wait_seconds)
+        if data is None:
+            raise RuntimeError("داگرتنی Background دوای چەند هەوڵێک سەرکەوتوو نەبوو: " + str(last_download_error))
 
         # WebM files begin with the EBML signature 1A 45 DF A3.
         # Also allow MP4 in case Commons redirects to an MP4 transcode.
