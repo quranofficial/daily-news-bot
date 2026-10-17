@@ -1041,7 +1041,7 @@ def run_ffmpeg(args):
         )
 
 
-def build_video(chat_id, ayahs, reciter_id, design=1, background_path=None, background_kind="image", include_tafsir=True, text_settings=None):
+def build_video(chat_id, ayahs, reciter_id, design=1, background_path=None, background_kind="image", darkness=0):
     stamp = str(int(time.time()))
 
     job_dir = os.path.join(
@@ -1132,25 +1132,22 @@ def build_video(chat_id, ayahs, reciter_id, design=1, background_path=None, back
                 i,
                 image_path,
                 design=design,
-                include_tafsir=include_tafsir,
-                settings=text_settings or {},
             )
 
             bg_path = background_path
-            if background_kind == "black":
-                bg_input = ["-f", "lavfi", "-i", "color=c=black:s=720x1280:r=24"]
-            else:
-                if not bg_path or not os.path.isfile(bg_path):
-                    raise RuntimeError("Background ـی هەڵبژێردراو نەدۆزرایەوە.")
-                bg_input = (["-stream_loop", "-1", "-i", bg_path]
-                            if background_kind == "video"
-                            else ["-loop", "1", "-i", bg_path])
+            if not bg_path or not os.path.isfile(bg_path):
+                raise RuntimeError("Background ـی هەڵبژێردراو نەدۆزرایەوە.")
+
+            bg_input = (["-stream_loop", "-1", "-i", bg_path]
+                        if background_kind == "video"
+                        else ["-loop", "1", "-i", bg_path])
             ffmpeg_args = ["ffmpeg", "-y"] + bg_input + [
                 "-loop", "1", "-i", image_path,
                 "-ss", "%.3f" % start_time,
                 "-i", full_audio_path,
                 "-filter_complex",
-                "[0:v]scale=720:1280:force_original_aspect_ratio=increase,crop=720:1280[bg];"
+                "[0:v]scale=720:1280:force_original_aspect_ratio=increase,crop=720:1280,"
+                "eq=brightness=-" + str(max(0, min(100, int(darkness))) / 100.0) + "[bg];"
                 "[1:v]scale=720:1280,format=rgba[ov];[bg][ov]overlay=0:0:shortest=1[v]",
                 "-map", "[v]", "-map", "2:a:0",
                 "-t", "%.3f" % duration,
@@ -1215,7 +1212,6 @@ def keyboard_output_modes():
     return {"inline_keyboard": [
         [{"text": "🖼️ ١. ڕسم", "callback_data": "mode:image"}],
         [{"text": "🎬 ٢. ڤیدیۆ", "callback_data": "mode:video"}],
-        [{"text": "⚫ پاشبنەمای ڕەشی تەواو", "callback_data": "mode:black"}],
     ]}
 
 
@@ -1229,62 +1225,15 @@ def keyboard_backgrounds(kind):
     return {"inline_keyboard": rows}
 
 
-def keyboard_tafsir():
-    return {"inline_keyboard": [
-        [{"text": "📖 لەگەڵ تەفسیر", "callback_data": "tafsir:on"}],
-        [{"text": "🕋 تەنها ئایەت، بێ تەفسیر", "callback_data": "tafsir:off"}],
-    ]}
-
-
-
-def keyboard_text_settings():
-    return {"inline_keyboard": [
-        [{"text": "🎨 ڕەنگی ئایەت: سپی", "callback_data": "setting:ayah_color"},
-         {"text": "🟡 ڕەنگی تەفسیر: زەرد", "callback_data": "setting:tafsir_color"}],
-        [{"text": "🔠 قەبارەی ئایەت", "callback_data": "setting:ayah_size"},
-         {"text": "🔡 قەبارەی تەفسیر", "callback_data": "setting:tafsir_size"}],
-        [{"text": "📝 قەبارەی ناو و ژمارە", "callback_data": "setting:other_size"}],
-        [{"text": "⬆️ شوێنی ئایەت", "callback_data": "setting:ayah_y"},
-         {"text": "⬇️ شوێنی تەفسیر", "callback_data": "setting:tafsir_y"}],
-        [{"text": "✅ تەواوە، دروستکردنی ڤیدیۆ", "callback_data": "settings:done"}],
-    ]}
-
-
-def keyboard_setting_values(setting):
-    choices = {
-        "ayah_color": [("سپی", (255,255,255)), ("زەرد", (255,210,90)), ("سەوز", (130,255,170)), ("شین", (130,200,255))],
-        "tafsir_color": [("زەرد", (255,210,90)), ("سپی", (255,255,255)), ("سەوز", (130,255,170)), ("شین", (130,200,255))],
-        "ayah_size": [("بچووک", 34), ("مامناوەند", 44), ("گەورە", 54), ("زۆر گەورە", 62)],
-        "tafsir_size": [("بچووک", 22), ("مامناوەند", 30), ("گەورە", 36), ("زۆر گەورە", 42)],
-        "other_size": [("بچووک", 18), ("مامناوەند", 24), ("گەورە", 30), ("زۆر گەورە", 36)],
-        "ayah_y": [("سەرەوە", 190), ("ناوەڕاست", 300), ("خوارەوە", 420)],
-        "tafsir_y": [("ناوەڕاست", 600), ("خوارەوە", 730), ("زۆر خوارەوە", 830)],
-    }
-    rows = []
-    for label, value in choices[setting]:
-        encoded = ",".join(map(str, value)) if isinstance(value, tuple) else str(value)
-        rows.append([{"text": label, "callback_data": "setval:%s:%s" % (setting, encoded)}])
-    rows.append([{"text": "↩️ گەڕانەوە بۆ ڕێکخستن", "callback_data": "settings:back"}])
-    return {"inline_keyboard": rows}
-
-
-def keyboard_designs():
-    names = [
-        ("🏔️ ١. شاخ و ئاویشار", 1),
-        ("🕌 ٢. کەوانەی مزگەوت", 2),
-        ("🌙 ٣. شەوی ئەستێردار", 3),
-        ("🏜️ ٤. خۆرئاوابوون", 4),
-        ("🌿 ٥. دارستانی سەوز", 5),
-        ("📜 ٦. پەڕەی کۆن", 6),
-        ("💎 ٧. کریستاڵی شەفاف", 7),
-        ("👑 ٨. شاهانەی زێڕین", 8),
-        ("🌌 ٩. ئاسمانی نیلی", 9),
-        ("🍁 ١٠. پاییزی زێڕین", 10),
-    ]
-    return {"inline_keyboard": [
-        [{"text": name, "callback_data": "design:%d" % number}]
-        for name, number in names
-    ]}
+def prompt_darkness(chat_id):
+    session = SESSIONS[chat_id]
+    session["state"] = "darkness"
+    send_message(
+        chat_id,
+        "🌑 ڕێژەی تاریککردنی پاشبنەما بنووسە لە 0 تا 100.\n\n"
+        "0 = هیچ تاریککردنێک نییە\n"
+        "25 = کەم\n50 = مامناوەند\n75 = زۆر\n100 = زۆر تاریک/ڕەش",
+    )
 
 
 def download_telegram_file(file_id, destination):
@@ -1301,15 +1250,9 @@ def download_telegram_file(file_id, destination):
     return destination
 
 
-def prompt_design(chat_id):
-    session = SESSIONS[chat_id]
-    session["state"] = "design"
-    send_message(chat_id, "🎨 ئێستا یەکێک لە ٥ دیزاینەکە هەڵبژێرە:", keyboard_designs())
-
-
 def create_selected_video(chat_id, design):
     session = SESSIONS.get(chat_id)
-    if not session or session.get("state") != "design":
+    if not session or session.get("state") != "darkness":
         send_message(chat_id, "داواکارییەکەت بەسەرچووە؛ /start بنووسە.")
         return
     job_dir = None
@@ -1321,15 +1264,9 @@ def create_selected_video(chat_id, design):
         ayahs = find_surah_rows(surah_number, start_ayah, end_ayah)
         surah = next(s for s in get_surahs() if int(s["number"]) == surah_number)
         reciter_name = RECITERS[reciter_id]["name"]
-        send_message(chat_id, "⏳ ڤیدیۆکەت دروست دەکەم...\n🎙️ قاری: %s\nسوورەت: %s\nئایەتەکان: %d–%d\n🎨 دیزاین: %d/10\nتکایە چاوەڕێ بکە." % (reciter_name, surah["name"], start_ayah, end_ayah, design))
-        video_path, job_dir = build_video(
-            chat_id, ayahs, reciter_id,
-            design=design,
-            background_path=session.get("background_path"),
-            background_kind=session.get("background_kind", "image"),
-            include_tafsir=bool(session.get("include_tafsir", True)),
-            text_settings=session.get("text_settings", {}),
-        )
+        darkness = int(session.get("darkness", 0))
+        send_message(chat_id, "⏳ ڤیدیۆکەت دروست دەکەم...\n🎙️ قاری: %s\nسوورەت: %s\nئایەتەکان: %d–%d\n🌑 تاریککردن: %d%%\nتکایە چاوەڕێ بکە." % (reciter_name, surah["name"], start_ayah, end_ayah, darkness))
+        video_path, job_dir = build_video(chat_id, ayahs, reciter_id, design=1, background_path=session.get("background_path"), background_kind=session.get("background_kind", "image"), darkness=darkness)
         send_video(chat_id, video_path, "قورئانی پیرۆز — %s\nقاری: %s\nئایەت %d–%d" % (surah["name"], reciter_name, start_ayah, end_ayah))
         send_message(chat_id, "✅ ڤیدیۆکە بە سەرکەوتوویی بۆ تۆ نێردرا.")
     except Exception as exc:
@@ -1435,8 +1372,8 @@ def handle_message(message):
                     raise RuntimeError("فایلەکە ڤیدیۆیەکی دروستی MP4 نییە.")
             session["background_path"] = destination
             session["background_kind"] = mode
-            session["state"] = "tafsir_choice"
-            send_message(chat_id, "✅ پاشبنەماکەت وەرگیرا. ئایا دەتەوێت تەفسیر لە ڤیدیۆکەدا دەرکەوێت؟", keyboard_tafsir())
+            send_message(chat_id, "✅ پاشبنەماکەت وەرگیرا.")
+            prompt_darkness(chat_id)
         except Exception as exc:
             log_exception("CUSTOM BACKGROUND UPLOAD ERROR", exc)
             send_message(chat_id, "❌ نەمتوانی فایلەکە وەربگرم: " + str(exc))
@@ -1444,6 +1381,17 @@ def handle_message(message):
 
     if message.get("photo") or message.get("video"):
         send_message(chat_id, "بۆ بەکارهێنانی گەلەری، سەرەتا /start بنووسە و قۆناغەکان تەواو بکە.")
+        return
+
+    if session.get("state") == "darkness":
+        try:
+            darkness = int(text)
+            if darkness < 0 or darkness > 100:
+                raise ValueError("تکایە ژمارەیەک لە 0 تا 100 بنووسە.")
+            session["darkness"] = darkness
+            create_selected_video(chat_id, 1)
+        except ValueError as exc:
+            send_message(chat_id, "ژمارەکە دروست نییە. تکایە تەنها ژمارەی 0 تا 100 بنووسە. " + str(exc))
         return
 
     if session.get("state") == "start_ayah":
@@ -1534,20 +1482,14 @@ def handle_callback(callback):
     try:
         if data.startswith("mode:"):
             kind = data.split(":", 1)[1]
-            if kind not in ("image", "video", "black"):
+            if kind not in ("image", "video"):
                 raise ValueError("جۆری پاشبنەما دروست نییە.")
             session = SESSIONS.get(chat_id)
             if not session or session.get("state") != "output_mode":
                 raise ValueError("تکایە /start دووبارە بکە.")
             session["background_kind"] = kind
-            if kind == "black":
-                session["background_path"] = None
-                session["state"] = "tafsir_choice"
-                edit_message(chat_id, message_id, "⚫ پاشبنەمای ڕەشی تەواو هەڵبژێردرا.")
-                answer_callback(callback_id)
-                send_message(chat_id, "ئایا دەتەوێت تەفسیر لە ڤیدیۆکەدا دەرکەوێت؟", keyboard_tafsir())
-                return
             session["state"] = "background_choice"
+            label = "وێنە" if kind == "image" else "ڤیدیۆ"
             edit_message(chat_id, message_id, "⏳ پێشبینینی ٥ پاشبنەما دەنێرم...")
             answer_callback(callback_id)
             send_background_previews(chat_id, kind)
@@ -1582,70 +1524,10 @@ def handle_callback(callback):
                     raise RuntimeError("فایلی %d.%s لە GitHub نەدۆزرایەوە. دڵنیابە فایلەکە لە ڕەگی repository ـەکەت بارکراوە. %s" % (number, ext, exc))
             session["background_path"] = local_path
             session["background_kind"] = kind
-            session["state"] = "tafsir_choice"
+            session["state"] = "darkness"
             answer_callback(callback_id, "پاشبنەما هەڵبژێردرا")
-            send_message(chat_id, "ئایا دەتەوێت تەفسیر لە ڤیدیۆکەدا دەرکەوێت؟", keyboard_tafsir())
-            return
-
-        if data.startswith("tafsir:"):
-            choice = data.split(":", 1)[1]
-            if choice not in ("on", "off"):
-                raise ValueError("هەڵبژاردەی تەفسیر دروست نییە.")
-            session = SESSIONS.get(chat_id)
-            if not session or session.get("state") != "tafsir_choice":
-                raise ValueError("تکایە /start دووبارە بکە.")
-            session["include_tafsir"] = (choice == "on")
-            session["text_settings"] = {"plain_overlay": True, "ayah_color": (255,255,255), "tafsir_color": (255,210,90), "other_color": (255,255,255), "ayah_size": 44, "tafsir_size": 30, "other_size": 24, "ayah_y": 250, "tafsir_y": 690, "other_y": 115}
-            session["state"] = "text_settings"
-            answer_callback(callback_id, "هەڵبژێردرا")
-            send_message(chat_id, "🎨 ڕێکخستنی دەق: ڕەنگ، قەبارە و شوێنی ئایەت و تەفسیر هەڵبژێرە. هیچ پەنجەرە و پاشبنەمای تایبەت بۆ دەقەکان نییە.", keyboard_text_settings())
-            return
-
-        if data.startswith("setting:"):
-            session = SESSIONS.get(chat_id)
-            setting = data.split(":", 1)[1]
-            if not session or session.get("state") != "text_settings":
-                raise ValueError("تکایە /start دووبارە بکە.")
-            answer_callback(callback_id)
-            send_message(chat_id, "هەڵبژاردەی خۆت بۆ %s دیاری بکە:" % setting, keyboard_setting_values(setting))
-            return
-
-        if data.startswith("setval:"):
-            _, setting, raw = data.split(":", 2)
-            session = SESSIONS.get(chat_id)
-            allowed = {"ayah_color", "tafsir_color", "ayah_size", "tafsir_size", "other_size", "ayah_y", "tafsir_y"}
-            if not session or session.get("state") != "text_settings" or setting not in allowed:
-                raise ValueError("ڕێکخستنەکە دروست نییە.")
-            if setting.endswith("color"):
-                value = tuple(int(x) for x in raw.split(","))
-                if len(value) != 3 or any(x < 0 or x > 255 for x in value): raise ValueError("ڕەنگی دروست نییە.")
-            else:
-                value = int(raw)
-            session.setdefault("text_settings", {"plain_overlay": True})[setting] = value
-            answer_callback(callback_id, "ڕێکخستن هەڵگیرا")
-            send_message(chat_id, "✅ ڕێکخستنەکە گۆڕدرا. دەتوانیت ڕێکخستنێکی تر هەڵبژێریت:", keyboard_text_settings())
-            return
-
-        if data == "settings:back":
-            answer_callback(callback_id)
-            send_message(chat_id, "🎨 ڕێکخستنی دەق:", keyboard_text_settings())
-            return
-
-        if data == "settings:done":
-            session = SESSIONS.get(chat_id)
-            if not session or session.get("state") != "text_settings":
-                raise ValueError("تکایە /start دووبارە بکە.")
-            session["state"] = "design"
-            answer_callback(callback_id, "ڕێکخستنەکان هەڵگیرا")
-            send_message(chat_id, "دیزاینی سادەی دەق هەڵبژێرە؛ دەقەکان بەبێ پەنجەرە دەرکەون:", keyboard_designs())
-            return
-
-        if data.startswith("design:"):
-            design = int(data.split(":", 1)[1])
-            if design not in range(1, 11):
-                raise ValueError("دیزاینەکە دروست نییە.")
-            answer_callback(callback_id, "دیزاین هەڵبژێردرا")
-            create_selected_video(chat_id, design)
+            send_message(chat_id, "✅ پاشبنەما هەڵبژێردرا.")
+            prompt_darkness(chat_id)
             return
 
         if data == "change_reciter":
