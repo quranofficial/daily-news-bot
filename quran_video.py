@@ -716,6 +716,11 @@ def create_ayah_image(ayah, index, image_path, design=1, transparent_background=
 
     draw = ImageDraw.Draw(image)
 
+    if transparent_background:
+        # A light overall dark veil keeps moving scenery visible while making
+        # Quran text and ornaments readable over bright water/sky.
+        draw.rectangle((0, 0, WIDTH, HEIGHT), fill=(2, 9, 20, 62))
+
     if not transparent_background:
         for y in range(HEIGHT):
             ratio = y / HEIGHT
@@ -831,7 +836,7 @@ def create_ayah_image(ayah, index, image_path, design=1, transparent_background=
     draw.rounded_rectangle(
         (43, 205, WIDTH - 43, 600),
         radius=27,
-        fill=tuple(max(0, c - 7) for c in palette["top"]),
+        fill=((*tuple(max(0, c - 7) for c in palette["top"]), 218) if transparent_background else tuple(max(0, c - 7) for c in palette["top"])),
         outline=gold,
         width=2
     )
@@ -873,7 +878,7 @@ def create_ayah_image(ayah, index, image_path, design=1, transparent_background=
     draw.rounded_rectangle(
         (43, 620, WIDTH - 43, 1095),
         radius=27,
-        fill=panel,
+        fill=((*panel, 218) if transparent_background else panel),
         outline=palette["edge"],
         width=2
     )
@@ -889,7 +894,7 @@ def create_ayah_image(ayah, index, image_path, design=1, transparent_background=
     draw.rounded_rectangle(
         (175, 640, WIDTH - 175, 687),
         radius=20,
-        fill=tuple(min(255, c + 12) for c in panel),
+        fill=((*tuple(min(255, c + 12) for c in panel), 232) if transparent_background else tuple(min(255, c + 12) for c in panel)),
         outline=soft_gold,
         width=1
     )
