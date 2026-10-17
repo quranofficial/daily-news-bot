@@ -702,10 +702,45 @@ def get_random_verses():
 
 
 # =========================
+# TRANSPARENT TEXT OVERLAY (NO PANELS/BOXES)
+# =========================
+def create_text_overlay(ayah, index, image_path, include_tafsir=True, settings=None):
+    """Transparent overlay: only text, no boxes, cards, panels, or background."""
+    settings = settings or {}
+    image = Image.new("RGBA", (WIDTH, HEIGHT), (0, 0, 0, 0))
+    draw = ImageDraw.Draw(image)
+    ayah_color = tuple(settings.get("ayah_color", (255, 255, 255)))
+    tafsir_color = tuple(settings.get("tafsir_color", (255, 210, 90)))
+    other_color = tuple(settings.get("other_color", (255, 255, 255)))
+    ayah_size = int(settings.get("ayah_size", 44))
+    tafsir_size = int(settings.get("tafsir_size", 30))
+    other_size = int(settings.get("other_size", 24))
+    ayah_y = int(settings.get("ayah_y", 250))
+    tafsir_y = int(settings.get("tafsir_y", 690))
+    other_y = int(settings.get("other_y", 115))
+    draw.text((WIDTH // 2, other_y), shape_rtl(str(ayah.get("surah_name", ""))),
+              font=make_font(other_size), fill=other_color, anchor="mm", direction="rtl", language="ar")
+    if settings.get("show_ayah_number", True):
+        draw.text((WIDTH // 2, other_y + other_size + 12), shape_rtl("ئایەتی " + str(ayah.get("ayah_number", ""))),
+                  font=make_font(max(12, other_size - 3)), fill=other_color, anchor="mm", direction="rtl", language="ar")
+    draw_rtl_block(draw, ayah.get("arabic", ""), ayah_y, WIDTH - 80, ayah_size, ayah_color,
+                   max_lines=35, line_gap=8, max_height=int(settings.get("ayah_height", 340)), use_quran_font=True)
+    if include_tafsir:
+        draw_rtl_block(draw, ayah.get("tafsir", ""), tafsir_y, WIDTH - 90, tafsir_size, tafsir_color,
+                       max_lines=50, line_gap=5, max_height=int(settings.get("tafsir_height", 430)), use_quran_font=False)
+    if settings.get("show_footer", True):
+        draw.text((WIDTH // 2, int(settings.get("footer_y", 1190))), shape_rtl("قورئانی پیرۆز - ڕێگای ئیسلام"),
+                  font=make_tafsir_font(max(12, other_size - 1)), fill=other_color, anchor="mm", direction="rtl", language="ar")
+    image.save(image_path)
+
+
+# =========================
 # CREATE PREMIUM VERSE IMAGE
 # =========================
 
-def create_ayah_image(ayah, index, image_path, design=1, include_tafsir=True):
+def create_ayah_image(ayah, index, image_path, design=1, include_tafsir=True, settings=None):
+    if settings is None or settings.get("plain_overlay", True):
+        return create_text_overlay(ayah, index, image_path, include_tafsir, settings)
     # Five user-selectable palettes; layout and Quran text remain the same.
     palettes = {
         1: {"name": "زمردی و زێڕین", "top": (7, 29, 34), "bottom": (14, 48, 47), "gold": (218, 185, 111), "soft": (151, 127, 76), "white": (250, 247, 235), "muted": (206, 220, 213), "panel": (16, 43, 47), "edge": (65, 104, 91)},
