@@ -699,258 +699,92 @@ def get_random_verses():
 # =========================
 
 def create_ayah_image(ayah, index, image_path, design=1):
-    # Five user-selectable palettes; layout and Quran text remain the same.
+    """Render one of five genuinely different Quran-card UI layouts."""
     palettes = {
-        1: {"name": "زمردی و زێڕین", "top": (7, 29, 34), "bottom": (14, 48, 47), "gold": (218, 185, 111), "soft": (151, 127, 76), "white": (250, 247, 235), "muted": (206, 220, 213), "panel": (16, 43, 47), "edge": (65, 104, 91)},
-        2: {"name": "شەوی شین", "top": (8, 20, 48), "bottom": (23, 45, 83), "gold": (232, 198, 121), "soft": (156, 145, 110), "white": (250, 249, 245), "muted": (205, 220, 241), "panel": (17, 35, 66), "edge": (73, 104, 157)},
-        3: {"name": "مۆر و زێڕ", "top": (31, 16, 43), "bottom": (62, 30, 67), "gold": (235, 194, 126), "soft": (159, 122, 100), "white": (255, 247, 244), "muted": (226, 207, 230), "panel": (43, 24, 53), "edge": (112, 75, 124)},
-        4: {"name": "خاکی و کرێمی", "top": (48, 34, 24), "bottom": (83, 61, 41), "gold": (244, 211, 151), "soft": (174, 137, 93), "white": (255, 248, 232), "muted": (231, 215, 188), "panel": (57, 42, 31), "edge": (139, 105, 72)},
-        5: {"name": "ڕەش و سپی", "top": (15, 18, 22), "bottom": (38, 42, 47), "gold": (224, 226, 229), "soft": (142, 148, 155), "white": (255, 255, 255), "muted": (216, 220, 224), "panel": (25, 29, 34), "edge": (96, 103, 112)},
+        1: {"name":"زمردی و زێڕین", "top":(7,29,34), "bottom":(14,48,47), "gold":(218,185,111), "soft":(151,127,76), "white":(250,247,235), "muted":(206,220,213), "panel":(16,43,47), "edge":(65,104,91)},
+        2: {"name":"شەوی شین", "top":(8,20,48), "bottom":(23,45,83), "gold":(232,198,121), "soft":(156,145,110), "white":(250,249,245), "muted":(205,220,241), "panel":(17,35,66), "edge":(73,104,157)},
+        3: {"name":"مۆر و زێڕ", "top":(31,16,43), "bottom":(62,30,67), "gold":(235,194,126), "soft":(159,122,100), "white":(255,247,244), "muted":(226,207,230), "panel":(43,24,53), "edge":(112,75,124)},
+        4: {"name":"خاکی و کرێمی", "top":(48,34,24), "bottom":(83,61,41), "gold":(244,211,151), "soft":(174,137,93), "white":(255,248,232), "muted":(231,215,188), "panel":(57,42,31), "edge":(139,105,72)},
+        5: {"name":"شەوی ڕەش و زێڕ", "top":(15,18,22), "bottom":(38,42,47), "gold":(224,226,229), "soft":(142,148,155), "white":(255,255,255), "muted":(216,220,224), "panel":(25,29,34), "edge":(96,103,112)},
     }
-    palette = palettes.get(int(design or 1), palettes[1])
-    # Transparent overlay: the selected photo/video remains visible behind the Quran design.
-    image = Image.new("RGBA", (WIDTH, HEIGHT), (0, 0, 0, 0))
-    draw = ImageDraw.Draw(image, "RGBA")
-
-    gold = palette["gold"]
-    soft_gold = palette["soft"]
-    white = palette["white"]
-    muted_white = palette["muted"]
-    panel = palette["panel"]
-
-    # Outer frame
-    draw.rounded_rectangle(
-        (19, 19, WIDTH - 19, HEIGHT - 19),
-        radius=32,
-        outline=gold,
-        width=3
-    )
-
-    draw.rounded_rectangle(
-        (31, 31, WIDTH - 31, HEIGHT - 31),
-        radius=27,
-        outline=palette["edge"],
-        width=1
-    )
-
-    # Decorative corners
-    corner_size = 42
-    margin = 42
-
-    corners = [
-        (margin, margin, 1, 1),
-        (WIDTH - margin, margin, -1, 1),
-        (margin, HEIGHT - margin, 1, -1),
-        (WIDTH - margin, HEIGHT - margin, -1, -1)
-    ]
-
-    for x, y, dx, dy in corners:
-        draw.line(
-            (x, y, x + dx * corner_size, y),
-            fill=gold,
-            width=2
-        )
-
-        draw.line(
-            (x, y, x, y + dy * corner_size),
-            fill=gold,
-            width=2
-        )
-
-        draw.ellipse(
-            (x - 4, y - 4, x + 4, y + 4),
-            fill=gold
-        )
-
-    # Header separator
-    draw.line(
-        (155, 77, WIDTH - 155, 77),
-        fill=soft_gold,
-        width=1
-    )
-
-    # Decorative diamond
+    design = int(design or 1)
+    p = palettes.get(design, palettes[1])
+    image = Image.new("RGBA", (WIDTH, HEIGHT), (0,0,0,0))
+    d = ImageDraw.Draw(image, "RGBA")
+    gold, white, muted, panel = p["gold"], p["white"], p["muted"], p["panel"]
     cx = WIDTH // 2
-    cy = 77
+    # Five different frame silhouettes and UI structures, not just different colours.
+    if design == 1:  # classic symmetrical double frame
+        d.rounded_rectangle((20,20,700,1260), radius=34, outline=gold, width=4)
+        d.rounded_rectangle((32,32,688,1248), radius=28, outline=p["edge"], width=2)
+        verse_box, tafsir_box = (45,220,675,615), (45,640,675,1080)
+        header_y, footer_y = 120, 1160
+    elif design == 2:  # modern glass cards with offset header
+        d.rounded_rectangle((18,18,702,1262), radius=24, outline=gold, width=3)
+        d.line((52,75,52,180), fill=gold, width=5)
+        d.rounded_rectangle((75,78,665,173), radius=18, fill=panel+(180,), outline=p["edge"], width=2)
+        verse_box, tafsir_box = (45,205,675,635), (75,660,675,1080)
+        header_y, footer_y = 125, 1160
+    elif design == 3:  # mosque arch / pointed top
+        d.line([(25,1260),(25,160),(cx,24),(695,160),(695,1260)], fill=gold, width=4)
+        d.line([(42,1260),(42,166),(cx,45),(678,166),(678,1260)], fill=p["edge"], width=2)
+        verse_box, tafsir_box = (65,235,655,625), (55,650,665,1080)
+        header_y, footer_y = 125, 1160
+    elif design == 4:  # editorial side rail and stacked information cards
+        d.rounded_rectangle((18,18,702,1262), radius=12, outline=gold, width=3)
+        d.rounded_rectangle((35,40,80,1240), radius=18, fill=gold+(220,))
+        d.text((57,90), str(index+1), font=make_font(24), fill=panel, anchor="mm")
+        verse_box, tafsir_box = (100,220,675,615), (100,640,675,1080)
+        header_y, footer_y = 125, 1160
+    else:  # rounded medallion / minimal luxury
+        d.rounded_rectangle((22,22,698,1258), radius=60, outline=gold, width=3)
+        d.rounded_rectangle((35,35,685,1245), radius=48, outline=p["edge"], width=2)
+        d.ellipse((cx-90,42,cx+90,222), fill=panel+(210,), outline=gold, width=3)
+        verse_box, tafsir_box = (50,250,670,625), (60,650,660,1080)
+        header_y, footer_y = 115, 1160
 
-    draw.polygon(
-        [
-            (cx, cy - 7),
-            (cx + 7, cy),
-            (cx, cy + 7),
-            (cx - 7, cy)
-        ],
-        fill=gold
-    )
+    # Surah header and small subtitle
+    d.text((cx,header_y), shape_rtl(ayah["surah_name"]), font=make_font(29), fill=gold, anchor="mm", direction="rtl", language="ar")
+    d.text((cx,header_y+39), shape_rtl("ئایەتی " + str(ayah["ayah_number"])), font=make_font(22), fill=muted, anchor="mm", direction="rtl", language="ar")
+    d.line((125,header_y+68,WIDTH-125,header_y+68), fill=p["soft"], width=2)
 
-    # Surah name: Kurdish/system font
-    draw.text(
-        (WIDTH // 2, 112),
-        shape_rtl(ayah["surah_name"]),
-        font=make_font(29),
-        fill=gold,
-        anchor="mm",
-        direction="rtl",
-        language="ar"
-    )
+    # Verse panel shape differs by design
+    if design == 3:
+        d.polygon([(verse_box[0],verse_box[1]+28),(cx,verse_box[1]),(verse_box[2],verse_box[1]+28),(verse_box[2],verse_box[3]-25),(cx,verse_box[3]),(verse_box[0],verse_box[3]-25)], fill=p["top"]+(205,), outline=gold)
+    elif design == 5:
+        d.rounded_rectangle(verse_box, radius=75, fill=panel+(200,), outline=gold, width=3)
+    else:
+        d.rounded_rectangle(verse_box, radius=26 if design != 4 else 12, fill=p["top"]+(205,), outline=gold, width=3)
+    d.rounded_rectangle((verse_box[0]+10,verse_box[1]+10,verse_box[2]-10,verse_box[3]-10), radius=20, outline=p["edge"], width=1)
+    # Ayah number medallion
+    my = verse_box[3]-34
+    d.ellipse((cx-31,my-26,cx+31,my+26), fill=panel+(245,), outline=gold, width=3)
+    d.text((cx,my), shape_rtl(str(ayah["ayah_number"])), font=make_font(23), fill=gold, anchor="mm", direction="rtl", language="ar")
+    draw_rtl_block(d, ayah["arabic"], verse_box[1]+38, verse_box[2]-verse_box[0]-54, 40, white, max_lines=30, line_gap=5, max_height=(verse_box[3]-verse_box[1])-105, use_quran_font=True)
 
-    # Ayah number: Kurdish/system font
-    draw.text(
-        (WIDTH // 2, 155),
-        shape_rtl("ئایەتی " + str(ayah["ayah_number"])),
-        font=make_font(23),
-        fill=muted_white,
-        anchor="mm",
-        direction="rtl",
-        language="ar"
-    )
+    # Tafsir card: shape and heading location vary by UI
+    if design == 3:
+        d.rounded_rectangle(tafsir_box, radius=32, fill=panel+(210,), outline=gold, width=2)
+        d.line((tafsir_box[0]+30,tafsir_box[1]+18,tafsir_box[2]-30,tafsir_box[1]+18), fill=gold, width=2)
+    elif design == 4:
+        d.rectangle(tafsir_box, fill=panel+(215,), outline=p["edge"], width=2)
+        d.rectangle((tafsir_box[0],tafsir_box[1],tafsir_box[0]+7,tafsir_box[3]), fill=gold+(255,))
+    else:
+        d.rounded_rectangle(tafsir_box, radius=30 if design != 5 else 60, fill=panel+(205,), outline=p["edge"], width=2)
+    d.rounded_rectangle((cx-115,tafsir_box[1]+12,cx+115,tafsir_box[1]+57), radius=20, fill=p["bottom"]+(235,), outline=gold, width=2)
+    d.text((cx,tafsir_box[1]+34), shape_rtl("تەفسیری ئاسان"), font=make_tafsir_font(25), fill=gold, anchor="mm", direction="rtl", language="ar")
+    draw_rtl_block(d, ayah["tafsir"], tafsir_box[1]+76, tafsir_box[2]-tafsir_box[0]-60, 31, white, max_lines=45, line_gap=5, max_height=(tafsir_box[3]-tafsir_box[1])-100, use_quran_font=False)
 
-    # Header divider
-    draw.line(
-        (245, 184, WIDTH - 245, 184),
-        fill=(72, 112, 94),
-        width=1
-    )
-
-    draw.ellipse(
-        (WIDTH // 2 - 4, 180, WIDTH // 2 + 4, 188),
-        fill=gold
-    )
-
-    # Quran verse panel
-    draw.rounded_rectangle(
-        (43, 205, WIDTH - 43, 600),
-        radius=27,
-        fill=tuple(max(0, c - 7) for c in palette["top"]) + (165,),
-        outline=gold,
-        width=2
-    )
-
-    draw.rounded_rectangle(
-        (53, 215, WIDTH - 53, 590),
-        radius=22,
-        outline=palette["edge"],
-        width=1
-    )
-
-    # Decorative markers
-    for marker_y in (230, 575):
-        draw.ellipse(
-            (
-                WIDTH // 2 - 4,
-                marker_y - 4,
-                WIDTH // 2 + 4,
-                marker_y + 4
-            ),
-            fill=gold
-        )
-
-    # Arabic Quran text: quran.ttf ONLY
-    draw_rtl_block(
-        draw,
-        ayah["arabic"],
-        240,
-        WIDTH - 120,
-        39,
-        white,
-        max_lines=30,
-        line_gap=5,
-        max_height=325,
-        use_quran_font=True
-    )
-
-    # Tafsir panel
-    draw.rounded_rectangle(
-        (43, 620, WIDTH - 43, 1095),
-        radius=27,
-        fill=panel + (175,),
-        outline=palette["edge"],
-        width=2
-    )
-
-    draw.rounded_rectangle(
-        (53, 630, WIDTH - 53, 1085),
-        radius=21,
-        outline=palette["edge"],
-        width=1
-    )
-
-    # Tafsir heading plaque: rabartafsir.ttf
-    draw.rounded_rectangle(
-        (175, 640, WIDTH - 175, 687),
-        radius=20,
-        fill=tuple(min(255, c + 12) for c in panel) + (220,),
-        outline=soft_gold,
-        width=1
-    )
-
-    draw.text(
-        (WIDTH // 2, 663),
-        shape_rtl("تەفسیری ئاسان"),
-        font=make_tafsir_font(27),
-        fill=gold,
-        anchor="mm",
-        direction="rtl",
-        language="ar"
-    )
-
-    # Decorative side markers
-    for x in (157, WIDTH - 157):
-        draw.ellipse(
-            (x - 3, 660, x + 3, 666),
-            fill=gold
-        )
-
-    # Tafsir body: rabartafsir.ttf
-    draw_rtl_block(
-        draw,
-        ayah["tafsir"],
-        700,
-        WIDTH - 120,
-        32,
-        white,
-        max_lines=45,
-        line_gap=4,
-        max_height=370,
-        use_quran_font=False
-    )
-
-    # Footer separator
-    draw.line(
-        (95, 1120, WIDTH - 95, 1120),
-        fill=soft_gold,
-        width=1
-    )
-
-    draw.polygon(
-        [
-            (WIDTH // 2, 1113),
-            (WIDTH // 2 + 7, 1120),
-            (WIDTH // 2, 1127),
-            (WIDTH // 2 - 7, 1120)
-        ],
-        fill=gold
-    )
-
-    # Brand footer: rabartafsir.ttf
-    draw.text(
-        (WIDTH // 2, 1160),
-        shape_rtl("قورئانی پیرۆز - ڕێگای ئیسلام"),
-        font=make_tafsir_font(23),
-        fill=gold,
-        anchor="mm",
-        direction="rtl",
-        language="ar"
-    )
-
-    draw.line(
-        (220, 1190, WIDTH - 220, 1190),
-        fill=(65, 101, 85),
-        width=1
-    )
-
+    # Distinct footer plaque
+    d.line((90,1120,WIDTH-90,1120), fill=p["soft"], width=2)
+    if design == 2:
+        d.rounded_rectangle((80,1137,640,1197), radius=30, fill=panel+(230,), outline=gold, width=2)
+    elif design == 4:
+        d.rectangle((100,1137,675,1197), fill=panel+(230,), outline=gold, width=2)
+    else:
+        d.rounded_rectangle((95,1137,625,1197), radius=25 if design != 5 else 40, fill=panel+(230,), outline=gold, width=2)
+    d.text((cx,1167), shape_rtl("قورئانی پیرۆز • دەنگی قاری"), font=make_tafsir_font(22), fill=gold, anchor="mm", direction="rtl", language="ar")
     image.save(image_path)
-
 
 # =========================
 # DOWNLOAD RECITATION AUDIO
