@@ -44,20 +44,20 @@ TIMINGS_BASE_URL = (
 SESSIONS = {}
 _SURAH_CACHE = None
 
-# Free-to-use stock video pages. The bot downloads a usable MP4 from each
-# Pexels page once and caches it locally in nature_backgrounds/.
+# Direct video-file links hosted by Wikimedia Commons. These avoid scraping
+# stock-video pages, which can return HTTP 403 to automated requests.
 BACKGROUND_PRESETS = {
     "forest": {
         "name": "🌿 دارستان و ئاویشار",
-        "page": "https://www.pexels.com/video/waterfall-in-forest-12110531/",
+        "url": "https://commons.wikimedia.org/wiki/Special:Redirect/file/Waterfall-1013185%2C_Dingle_Peninsula%2C_Co._Kerry%2C_Ireland.webm",
     },
     "sea": {
         "name": "🌊 شەپۆلی دەریا",
-        "page": "https://www.pexels.com/video/a-video-of-beach-waves-4605080/",
+        "url": "https://commons.wikimedia.org/wiki/Special:Redirect/file/Ocean_waves_at_L%C3%A6kjavik_beach%2C_Iceland.webm",
     },
     "mountains": {
         "name": "⛰️ شاخ و هەوری جوڵاو",
-        "page": "https://www.pexels.com/video/fog-and-moving-clouds-in-a-mountain-landscape-10481977/",
+        "url": "https://commons.wikimedia.org/wiki/Special:Redirect/file/A_multitude_of_mountain_wave_clouds_on_the_lee_of_the_Andes_%28CIRA_2019-07-16%29.webm",
     },
 }
 BACKGROUND_DIR = os.path.join(BASE_DIR, "nature_backgrounds")
@@ -1002,78 +1002,61 @@ def find_surah_rows(surah_number, start_ayah, end_ayah):
 # =========================
 
 def ensure_background_video(background_key):
-    """Download and cache a free stock MP4 for the selected nature preset."""
+    """Download and cache a nature video directly from Wikimedia Commons."""
     if background_key not in BACKGROUND_PRESETS:
         raise ValueError("Background ـی هەڵبژێردراو دروست نییە.")
 
     os.makedirs(BACKGROUND_DIR, exist_ok=True)
-    output_path = os.path.join(BACKGROUND_DIR, background_key + ".mp4")
+    # WebM is supported by FFmpeg; using its own extension avoids mislabeling.
+    output_path = os.path.join(BACKGROUND_DIR, background_key + ".webm")
 
     if os.path.isfile(output_path) and os.path.getsize(output_path) > 100_000:
         return output_path
 
-    page_url = BACKGROUND_PRESETS[background_key]["page"]
-    log_error("Fetching stock video page for background=%s" % background_key)
-    request = urllib.request.Request(
-        page_url,
-        headers={
-            "User-Agent": "Mozilla/5.0 (compatible; QuranVideoBot/1.0)",
-            "Accept": "text/html,application/xhtml+xml",
-        },
-    )
-    with urllib.request.urlopen(request, timeout=60) as response:
-        html = response.read().decode("utf-8", errors="replace")
+    video_url = BACKGROUND_PRESETS[background_key]["url"]
+    temp_path = output_path + ".part"
+    log_error("Downloading Commons background video=%s" % background_key)
 
-    # Pexels embeds direct MP4 file URLs in the page metadata. Prefer a
-    # lower-resolution file to keep server storage and processing reasonable.
-    html = html.replace("\\u002F", "/").replace("\\/", "/").replace("\\u0026", "&")
-    urls = re.findall(r'https?://videos\.pexels\.com/video-files/[^\"\'<>\s]+?\.mp4(?:\?[^\"\'<>\s]*)?', html)
-    unique_urls = []
-    for url in urls:
-        url = url.replace("&amp;", "&")
-        if url not in unique_urls:
-            unique_urls.append(url)
+    try:
+        request = urllib.request.Request(
+            video_url,
+            headers={
+                "User-Agent": "QuranVideoBot/1.0 (nature background downloader)",
+                "Accept": "video/webm,video/*;q=0.9,*/*;q=0.8",
+            },
+        )
+        with urllib.request.urlopen(request, timeout=180) as response:
+            data = response.read()
 
-    if not unique_urls:
-        # Some page variants expose protocol-relative URLs.
-        urls = re.findall(r'//videos\.pexels\.com/video-files/[^\"\'<>\s]+?\.mp4(?:\?[^\"\'<>\s]*)?', html)
-        unique_urls = ["https:" + u for u in urls]
+        # WebM files begin with the EBML signature 1A 45 DF A3.
+        # Also allow MP4 in case Commons redirects to an MP4 transcode.
+        is_webm = data[:4] == b"\x1aE\xdf\xa3"
+        is_mp4 = len(data) >= 8 and data[4:8] == b"ftyp"
+        if len(data) < 100_000 or not (is_webm or is_mp4):
+            raise RuntimeError(
+                "سەرچاوەکە فایلێکی ڤیدیۆی دروستی نەگەڕاندەوە."
+            )
 
-    if not unique_urls:
+        with open(temp_path, "wb") as f:
+            f.write(data)
+        os.replace(temp_path, output_path)
+        log_error(
+            "BACKGROUND READY | key=%s | bytes=%d"
+            % (background_key, len(data))
+        )
+        return output_path
+
+    except Exception as exc:
+        log_exception("Background download failed: " + background_key, exc)
+        try:
+            if os.path.exists(temp_path):
+                os.remove(temp_path)
+        except OSError:
+            pass
         raise RuntimeError(
-            "نەتوانرا بەستەری MP4 بۆ Background وەربگیرێت. "
-            "تکایە دواتر هەوڵ بدەوە؛ پەڕەی سەرچاوە گۆڕاوە."
+            "نەتوانرا ڤیدیۆی Background دابەزێنرێت: " + str(exc)
         )
 
-    # Pexels usually lists smaller encodings alongside HD/4K; take the
-    # first available URL and fall back through others if a source is stale.
-    last_error = None
-    for video_url in unique_urls:
-        temp_path = output_path + ".part"
-        try:
-            req = urllib.request.Request(
-                video_url,
-                headers={"User-Agent": "Mozilla/5.0 QuranVideoBot/1.0"},
-            )
-            with urllib.request.urlopen(req, timeout=120) as response:
-                data = response.read()
-            if len(data) < 100_000 or not (data[4:8] == b"ftyp" or b"ftyp" in data[:32]):
-                raise RuntimeError("سەرچاوەکە MP4 ـێکی دروستی نەگەڕاندەوە.")
-            with open(temp_path, "wb") as f:
-                f.write(data)
-            os.replace(temp_path, output_path)
-            log_error("BACKGROUND READY | key=%s | bytes=%d" % (background_key, len(data)))
-            return output_path
-        except Exception as exc:
-            last_error = exc
-            log_error("Background source failed | %s | %r" % (video_url, exc))
-            try:
-                if os.path.exists(temp_path):
-                    os.remove(temp_path)
-            except OSError:
-                pass
-
-    raise RuntimeError("نەتوانرا ڤیدیۆی Background دابەزێنرێت: " + str(last_error))
 
 
 def keyboard_backgrounds():
