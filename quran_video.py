@@ -718,11 +718,12 @@ def create_text_overlay(ayah, index, image_path, include_tafsir=True, settings=N
     ayah_y = int(settings.get("ayah_y", 250))
     tafsir_y = int(settings.get("tafsir_y", 690))
     other_y = int(settings.get("other_y", 115))
-    draw.text((WIDTH // 2, other_y), shape_rtl(str(ayah.get("surah_name", ""))),
-              font=make_font(other_size), fill=other_color, anchor="mm", direction="rtl", language="ar")
-    if settings.get("show_ayah_number", True):
-        draw.text((WIDTH // 2, other_y + other_size + 12), shape_rtl("ئایەتی " + str(ayah.get("ayah_number", ""))),
-                  font=make_font(max(12, other_size - 3)), fill=other_color, anchor="mm", direction="rtl", language="ar")
+    if settings.get("show_header", True):
+        draw.text((WIDTH // 2, other_y), shape_rtl(str(ayah.get("surah_name", ""))),
+                  font=make_font(other_size), fill=other_color, anchor="mm", direction="rtl", language="ar")
+        if settings.get("show_ayah_number", True):
+            draw.text((WIDTH // 2, other_y + other_size + 12), shape_rtl("ئایەتی " + str(ayah.get("ayah_number", ""))),
+                      font=make_font(max(12, other_size - 3)), fill=other_color, anchor="mm", direction="rtl", language="ar")
     surah_number = int(ayah.get("surah_number", 0) or 0)
     ayah_number = int(ayah.get("ayah_number", 0) or 0)
     show_basmala = ayah_number == 1 and surah_number not in (1, 9)
@@ -749,8 +750,43 @@ def create_text_overlay(ayah, index, image_path, include_tafsir=True, settings=N
         draw_rtl_block(draw, ayah.get("tafsir", ""), tafsir_y, WIDTH - 90, tafsir_size, tafsir_color,
                        max_lines=50, line_gap=5, max_height=int(settings.get("tafsir_height", 430)), use_quran_font=False)
     if settings.get("show_footer", True):
-        draw.text((WIDTH // 2, int(settings.get("footer_y", 1190))), shape_rtl("قورئانی پیرۆز - ڕێگای ئیسلام"),
-                  font=make_tafsir_font(max(12, other_size - 1)), fill=other_color, anchor="mm", direction="rtl", language="ar")
+        footer_text = str(settings.get("footer_text", "قورئانی پیرۆز - ڕێگای ئیسلام"))
+        footer_size = max(12, int(settings.get("footer_size", 34)))
+        if include_tafsir:
+            footer_y = int(settings.get("footer_y", 1145))
+        else:
+            footer_y = int(settings.get("footer_y", 1045))
+        draw.text(
+            (WIDTH // 2, footer_y),
+            shape_rtl(footer_text),
+            font=make_tafsir_font(footer_size),
+            fill=other_color,
+            anchor="mm",
+            direction="rtl",
+            language="ar",
+        )
+        if settings.get("show_footer_info", True):
+            info_size = max(12, int(settings.get("other_size", 24)))
+            surah_y = footer_y + 34
+            ayah_y_footer = footer_y + 62
+            draw.text(
+                (WIDTH // 2, surah_y),
+                shape_rtl("سوورەت: " + str(ayah.get("surah_name", ""))),
+                font=make_font(info_size),
+                fill=other_color,
+                anchor="mm",
+                direction="rtl",
+                language="ar",
+            )
+            draw.text(
+                (WIDTH // 2, ayah_y_footer),
+                shape_rtl("ژمارەی ئایەت: " + str(ayah.get("ayah_number", ""))),
+                font=make_font(max(12, info_size - 2)),
+                fill=other_color,
+                anchor="mm",
+                direction="rtl",
+                language="ar",
+            )
     image.save(image_path)
 
 
@@ -759,7 +795,7 @@ def create_text_overlay(ayah, index, image_path, include_tafsir=True, settings=N
 # =========================
 
 def create_ayah_image(ayah, index, image_path, design=1, include_tafsir=True, settings=None):
-    if settings is None or settings.get("plain_overlay", True):
+    if settings is None or settings.get("plain_overlay", False):
         return create_text_overlay(ayah, index, image_path, include_tafsir, settings)
     # Five user-selectable palettes; layout and Quran text remain the same.
     palettes = {
@@ -774,18 +810,24 @@ def create_ayah_image(ayah, index, image_path, design=1, include_tafsir=True, se
         9: {"name": "ئاسمانی نیلی", "top": (8, 18, 54), "bottom": (30, 28, 83), "gold": (192, 180, 255), "soft": (128, 123, 189), "white": (250, 248, 255), "muted": (216, 214, 244), "panel": (13, 19, 57), "edge": (94, 92, 165)},
         10: {"name": "پاییزی زێڕین", "top": (63, 27, 12), "bottom": (104, 47, 18), "gold": (255, 204, 116), "soft": (188, 123, 57), "white": (255, 247, 228), "muted": (245, 217, 177), "panel": (52, 23, 13), "edge": (163, 87, 39)},
     }
-    palette = palettes.get(int(design or 1), palettes[1])
+    design = 1
+    palette = palettes[1]
     image = Image.new("RGBA", (WIDTH, HEIGHT), (0, 0, 0, 0))
     draw = ImageDraw.Draw(image)
 
-    gold = palette["gold"]
+    gold = tuple(settings.get("other_color", palette["gold"]))
     soft_gold = palette["soft"]
-    white = palette["white"]
-    muted_white = palette["muted"]
+    white = tuple(settings.get("ayah_color", palette["white"]))
+    tafsir_fill = tuple(settings.get("tafsir_color", palette["white"]))
+    muted_white = tuple(settings.get("other_color", palette["muted"]))
     panel = palette["panel"]
+    ayah_size = int(settings.get("ayah_size", 39))
+    tafsir_size = int(settings.get("tafsir_size", 32))
+    other_size = int(settings.get("other_size", 29))
+    footer_text = str(settings.get("footer_text", "قورئانی پیرۆز - ڕێگای ئیسلام"))
 
     # Outer frame
-    style = int(design or 1)
+    style = 1
     if style in (2, 8):
         draw.arc((20, 15, WIDTH - 20, 260), 180, 360, fill=gold, width=4)
         draw.line((20, 130, 20, HEIGHT - 45, WIDTH - 20, HEIGHT - 45, WIDTH - 20, 130), fill=gold, width=3)
@@ -853,27 +895,26 @@ def create_ayah_image(ayah, index, image_path, design=1, include_tafsir=True, se
         fill=gold
     )
 
-    # Surah name: Kurdish/system font
-    draw.text(
-        (WIDTH // 2, 112),
-        shape_rtl(ayah["surah_name"]),
-        font=make_font(29),
-        fill=gold,
-        anchor="mm",
-        direction="rtl",
-        language="ar"
-    )
-
-    # Ayah number: Kurdish/system font
-    draw.text(
-        (WIDTH // 2, 155),
-        shape_rtl("ئایەتی " + str(ayah["ayah_number"])),
-        font=make_font(23),
-        fill=muted_white,
-        anchor="mm",
-        direction="rtl",
-        language="ar"
-    )
+    # Optional surah name and ayah number header.
+    if settings.get("show_header", True):
+        draw.text(
+            (WIDTH // 2, 112),
+            shape_rtl(ayah["surah_name"]),
+            font=make_font(other_size),
+            fill=gold,
+            anchor="mm",
+            direction="rtl",
+            language="ar"
+        )
+        draw.text(
+            (WIDTH // 2, 155),
+            shape_rtl("ئایەتی " + str(ayah["ayah_number"])),
+            font=make_font(max(12, other_size - 6)),
+            fill=muted_white,
+            anchor="mm",
+            direction="rtl",
+            language="ar"
+        )
 
     # Header divider
     draw.line(
@@ -940,7 +981,7 @@ def create_ayah_image(ayah, index, image_path, design=1, include_tafsir=True, se
         ayah["arabic"],
         verse_top,
         WIDTH - 120,
-        39,
+        ayah_size,
         white,
         max_lines=30,
         line_gap=5,
@@ -997,22 +1038,26 @@ def create_ayah_image(ayah, index, image_path, design=1, include_tafsir=True, se
             ayah["tafsir"],
             700,
             WIDTH - 120,
-            32,
-            white,
+            tafsir_size,
+            tafsir_fill,
             max_lines=45,
             line_gap=4,
             max_height=370,
             use_quran_font=False
         )
 
-        footer_y = 1120
-        brand_y = 1160
-        bottom_line_y = 1190
+        footer_y = 1107 if settings.get("show_footer_info", True) else 1120
+        brand_y = 1135 if settings.get("show_footer_info", True) else 1160
+        footer_surah_y = 1165
+        footer_ayah_y = 1195
+        bottom_line_y = 1225 if settings.get("show_footer_info", True) else 1190
     else:
         # With no tafsir, leave the background transparent below the Quran panel.
         footer_y = 1015
-        brand_y = 1060
-        bottom_line_y = 1090
+        brand_y = 1048 if settings.get("show_footer_info", True) else 1060
+        footer_surah_y = 1080
+        footer_ayah_y = 1110
+        bottom_line_y = 1140 if settings.get("show_footer_info", True) else 1090
 
     # Footer separator
     draw.line(
@@ -1034,13 +1079,34 @@ def create_ayah_image(ayah, index, image_path, design=1, include_tafsir=True, se
     # Brand footer: rabartafsir.ttf
     draw.text(
         (WIDTH // 2, brand_y),
-        shape_rtl("قورئانی پیرۆز - ڕێگای ئیسلام"),
-        font=make_tafsir_font(23),
+        shape_rtl(footer_text),
+        font=make_tafsir_font(max(12, int(settings.get("footer_size", 34)))),
         fill=gold,
         anchor="mm",
         direction="rtl",
         language="ar"
     )
+
+    if settings.get("show_footer_info", True):
+        info_size = max(12, int(settings.get("other_size", 24)))
+        draw.text(
+            (WIDTH // 2, footer_surah_y),
+            shape_rtl("سوورەت: " + str(ayah.get("surah_name", ""))),
+            font=make_font(info_size),
+            fill=muted_white,
+            anchor="mm",
+            direction="rtl",
+            language="ar"
+        )
+        draw.text(
+            (WIDTH // 2, footer_ayah_y),
+            shape_rtl("ژمارەی ئایەت: " + str(ayah.get("ayah_number", ""))),
+            font=make_font(max(12, info_size - 2)),
+            fill=muted_white,
+            anchor="mm",
+            direction="rtl",
+            language="ar"
+        )
 
     draw.line(
         (220, bottom_line_y, WIDTH - 220, bottom_line_y),
