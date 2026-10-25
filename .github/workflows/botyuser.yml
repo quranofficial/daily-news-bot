@@ -34,7 +34,7 @@ jobs:
       - name: Install system packages
         run: |
           sudo apt-get update
-          sudo apt-get install -y ffmpeg fonts-noto-core
+          sudo apt-get install -y ffmpeg
 
       - name: Install Python requirements
         run: |
@@ -45,7 +45,12 @@ jobs:
         run: |
           test -f quran_video.py
           test -f botyuser.py
-          test -f quran.ttf
+          test -f fonts/quran1.ttf
+          test -f fonts/quran2.ttf
+          test -f fonts/quran3.ttf
+          test -f fonts/rabar1.ttf
+          test -f fonts/rabar2.ttf
+          test -f fonts/rabar3.ttf
 
       - name: Start Telegram bot
         run: python -u botyuser.py
