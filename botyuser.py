@@ -5,13 +5,18 @@ import os
 import sys
 import json
 import time
+import queue
+import hashlib
 import shutil
 import sqlite3
+import threading
 import subprocess
 import traceback
 import urllib.request
 import urllib.parse
 import urllib.error
+
+from PIL import Image, ImageOps
 
 import quran_video as qv
 
@@ -48,20 +53,38 @@ SESSIONS = {}
 _SURAH_CACHE = None
 
 
+# =========================
+# CONCURRENCY (multiple users at the same time)
+# =========================
+
+# How many videos can be built simultaneously (4-5 by default).
+MAX_CONCURRENT_JOBS = int(os.environ.get("MAX_CONCURRENT_JOBS", "5"))
+JOB_SLOTS = threading.BoundedSemaphore(MAX_CONCURRENT_JOBS)
+
+# chat_ids that currently have a running video job.
+ACTIVE_JOBS = set()
+_ACTIVE_JOBS_LOCK = threading.Lock()
+
+# Guards the user_preferences JSON file across threads.
+PREFS_LOCK = threading.Lock()
+
+
 def load_user_preferences():
-    try:
-        with open(USER_PREFS_PATH, "r", encoding="utf-8") as file:
-            data = json.load(file)
-            return data if isinstance(data, dict) else {}
-    except (OSError, ValueError):
-        return {}
+    with PREFS_LOCK:
+        try:
+            with open(USER_PREFS_PATH, "r", encoding="utf-8") as file:
+                data = json.load(file)
+                return data if isinstance(data, dict) else {}
+        except (OSError, ValueError):
+            return {}
 
 
 def save_user_preferences(data):
-    temp_path = USER_PREFS_PATH + ".tmp"
-    with open(temp_path, "w", encoding="utf-8") as file:
-        json.dump(data, file, ensure_ascii=False, indent=2)
-    os.replace(temp_path, USER_PREFS_PATH)
+    with PREFS_LOCK:
+        temp_path = USER_PREFS_PATH + ".tmp"
+        with open(temp_path, "w", encoding="utf-8") as file:
+            json.dump(data, file, ensure_ascii=False, indent=2)
+        os.replace(temp_path, USER_PREFS_PATH)
 
 
 def default_text_settings():
@@ -80,6 +103,8 @@ def default_text_settings():
         "show_footer_info": True,
         "footer_text": "قورئانی پیرۆز - ڕێگای ئیسلام",
         "footer_size": 34,
+        "ayah_font": qv.DEFAULT_AYAH_FONT,
+        "tafsir_font": qv.DEFAULT_TAFSIR_FONT,
     }
 
 
@@ -1154,7 +1179,7 @@ def run_ffmpeg(args):
         )
 
 
-def build_video(chat_id, ayahs, reciter_id, design=1, background_path=None, background_kind="image", background_darkness=0, include_tafsir=True, text_settings=None):
+def build_video(chat_id, ayahs, reciter_id, background_path=None, background_kind="image", background_darkness=0, include_tafsir=True, text_settings=None, progress=None):
     stamp = str(int(time.time()))
 
     job_dir = os.path.join(
@@ -1170,6 +1195,14 @@ def build_video(chat_id, ayahs, reciter_id, design=1, background_path=None, back
         % (chat_id, reciter_id, job_dir)
     )
 
+    def report(percent, label=""):
+        if progress is None:
+            return
+        try:
+            progress(int(percent), label)
+        except Exception as exc:
+            log_error("PROGRESS CALLBACK FAILED | %r" % exc)
+
     try:
         surah_number = int(ayahs[0]["surah_number"])
 
@@ -1178,11 +1211,15 @@ def build_video(chat_id, ayahs, reciter_id, design=1, background_path=None, back
             "%03d.mp3" % surah_number,
         )
 
+        report(3, "داگرتنی دەنگی قاری...")
+
         download_surah_audio(
             surah_number,
             reciter_id,
             full_audio_path,
         )
+
+        report(9, "خوێندنەوەی کاتەکانی ئایەتەکان...")
 
         timings = get_ayah_timings(
             reciter_id,
@@ -1193,7 +1230,10 @@ def build_video(chat_id, ayahs, reciter_id, design=1, background_path=None, back
             full_audio_path
         )
 
-        clips = []
+        # Compute every ayah time window first, so we know the total
+        # duration and can keep the background video continuous.
+        segments = []
+        background_offset = 0.0
 
         for i, ayah in enumerate(ayahs, 1):
             ayah_number = int(ayah["ayah_number"])
@@ -1230,6 +1270,60 @@ def build_video(chat_id, ayahs, reciter_id, design=1, background_path=None, back
                     % ayah_number
                 )
 
+            segments.append({
+                "ayah": ayah,
+                "index": i,
+                "start": start_time,
+                "duration": duration,
+                "bg_offset": background_offset,
+            })
+
+            background_offset += duration
+
+        total_duration = background_offset
+        darkness_value = max(0, min(100, int(background_darkness)))
+        brightness = -darkness_value / 100.0
+
+        # Video backgrounds are rendered ONCE as a continuous track,
+        # so the background never restarts when the ayah changes.
+        background_full = None
+
+        if background_kind == "video":
+            if not background_path or not os.path.isfile(background_path):
+                raise RuntimeError("Background ـی هەڵبژێردراو نەدۆزرایەوە.")
+
+            report(14, "ئامادەکردنی پاشبنەمای بەردەوام...")
+
+            background_full = os.path.join(job_dir, "background_full.mp4")
+
+            run_ffmpeg([
+                "ffmpeg", "-y",
+                "-stream_loop", "-1",
+                "-i", background_path,
+                "-t", "%.3f" % total_duration,
+                "-vf",
+                "scale=720:1280:force_original_aspect_ratio=increase,"
+                "crop=720:1280,eq=brightness=%.2f,format=yuv420p" % brightness,
+                "-r", "24",
+                "-c:v", "libx264", "-preset", "ultrafast", "-crf", "23",
+                "-an",
+                background_full,
+            ])
+
+        clips = []
+        total_segments = max(1, len(segments))
+
+        for segment in segments:
+            i = segment["index"]
+            ayah = segment["ayah"]
+            duration = segment["duration"]
+
+            report(
+                20 + 60 * (i - 1) // total_segments,
+                "دروستکردنی بەشی %d لە %d (ئایەتی %s)..."
+                % (i, total_segments, ayah["ayah_number"]),
+            )
+
             image_path = os.path.join(
                 job_dir,
                 "image_%03d.png" % i,
@@ -1244,28 +1338,38 @@ def build_video(chat_id, ayahs, reciter_id, design=1, background_path=None, back
                 ayah,
                 i,
                 image_path,
-                design=design,
                 include_tafsir=include_tafsir,
                 settings=text_settings or {},
             )
 
-            bg_path = background_path
             if background_kind == "black":
                 bg_input = ["-f", "lavfi", "-i", "color=c=black:s=720x1280:r=24"]
+                bg_chain = "[0:v]eq=brightness=%.2f[bg];" % brightness
+            elif background_kind == "video":
+                # Continue the shared background exactly where the
+                # previous ayah stopped.
+                bg_input = [
+                    "-ss", "%.3f" % segment["bg_offset"],
+                    "-i", background_full,
+                ]
+                bg_chain = "[0:v]null[bg];"
             else:
-                if not bg_path or not os.path.isfile(bg_path):
+                if not background_path or not os.path.isfile(background_path):
                     raise RuntimeError("Background ـی هەڵبژێردراو نەدۆزرایەوە.")
-                bg_input = (["-stream_loop", "-1", "-i", bg_path]
-                            if background_kind == "video"
-                            else ["-loop", "1", "-i", bg_path])
+                bg_input = ["-loop", "1", "-i", background_path]
+                bg_chain = (
+                    "[0:v]scale=720:1280:force_original_aspect_ratio=increase,"
+                    "crop=720:1280,eq=brightness=%.2f[bg];" % brightness
+                )
+
             ffmpeg_args = ["ffmpeg", "-y"] + bg_input + [
                 "-loop", "1", "-i", image_path,
-                "-ss", "%.3f" % start_time,
+                "-ss", "%.3f" % segment["start"],
                 "-i", full_audio_path,
                 "-filter_complex",
-                "[0:v]scale=720:1280:force_original_aspect_ratio=increase,crop=720:1280,"
-                "eq=brightness=%.2f[bg];" % (-max(0, min(100, int(background_darkness))) / 100.0)
-                + "[1:v]scale=720:1280,format=rgba[ov];[bg][ov]overlay=0:0:shortest=1[v]",
+                bg_chain
+                + "[1:v]scale=720:1280,format=rgba[ov];"
+                + "[bg][ov]overlay=0:0:shortest=1[v]",
                 "-map", "[v]", "-map", "2:a:0",
                 "-t", "%.3f" % duration,
                 "-c:v", "libx264", "-preset", "veryfast",
@@ -1276,6 +1380,10 @@ def build_video(chat_id, ayahs, reciter_id, design=1, background_path=None, back
             run_ffmpeg(ffmpeg_args)
 
             clips.append(clip_path)
+
+            report(20 + 60 * i // total_segments, "")
+
+        report(84, "یەکخستنی بەشەکانی ڤیدیۆ...")
 
         list_path = os.path.join(
             job_dir,
@@ -1311,6 +1419,8 @@ def build_video(chat_id, ayahs, reciter_id, design=1, background_path=None, back
             raise RuntimeError(
                 "فایلی ڤیدیۆی کۆتایی دروست نەکرا."
             )
+
+        report(90, "ڤیدیۆکە ئامادەیە")
 
         log_error(
             "VIDEO JOB SUCCESS | output=%s | size=%s"
@@ -1370,6 +1480,154 @@ def color_label(value):
     return colors.get(tuple(value) if isinstance(value, (list, tuple)) else value, "تایبەت")
 
 
+# =========================
+# FONT SELECTION (3 fonts)
+# =========================
+
+def keyboard_fonts(setting, current=None):
+    """Keyboard for choosing one of the 3 fonts."""
+    rows = []
+
+    for key, info in qv.FONT_FILES.items():
+        mark = " ✔" if current == key else ""
+        rows.append([{
+            "text": "🔤 " + info["name"] + mark,
+            "callback_data": "setval:%s:%s" % (setting, key),
+        }])
+
+    rows.append([{"text": "↩️ گەڕانەوە بۆ ڕێکخستن", "callback_data": "settings:back"}])
+    return {"inline_keyboard": rows}
+
+
+SETTING_LABELS = {
+    "ayah_color": "ڕەنگی ئایەت",
+    "tafsir_color": "ڕەنگی تەفسیر",
+    "ayah_size": "قەبارەی ئایەت",
+    "tafsir_size": "قەبارەی تەفسیر",
+    "other_size": "قەبارەی ناو و ژمارە",
+    "footer_size": "قەبارەی دەقی خوارەوە",
+    "ayah_y": "شوێنی ئایەت",
+    "tafsir_y": "شوێنی تەفسیر",
+    "ayah_font": "فۆنتی ئایەت",
+    "tafsir_font": "فۆنتی تەفسیر",
+}
+
+
+# =========================
+# SETTINGS LIVE PREVIEW
+# =========================
+
+PREVIEW_DIR = os.path.join(JOBS_DIR, "previews")
+
+SAMPLE_AYAH = {
+    "surah_number": 94,
+    "surah_name": "الشرح",
+    "ayah_number": 6,
+    "arabic": "إِنَّ مَعَ الْعُسْرِ يُسْرًا",
+    "tafsir": "بێگومان لەگەڵ هەموو سەختییەکەوە ئاسانییەک هەیە. ئەمە نموونەیەکە بۆ پیشاندانی شێوازی ڕێکخستنەکانت.",
+}
+
+
+def _preview_base_image(session, cache_key):
+    """720x1280 PIL image of the chosen background, darkened like the video."""
+    kind = session.get("background_kind", "image")
+    darkness = max(0, min(100, int(session.get("background_darkness", 0) or 0)))
+
+    if kind == "black":
+        base = Image.new("RGB", (qv.WIDTH, qv.HEIGHT), (0, 0, 0))
+    elif kind == "video":
+        path = session.get("background_path")
+        if not path or not os.path.isfile(path):
+            base = Image.new("RGB", (qv.WIDTH, qv.HEIGHT), (10, 10, 10))
+        else:
+            os.makedirs(PREVIEW_DIR, exist_ok=True)
+            frame_path = os.path.join(PREVIEW_DIR, "frame_%s.png" % cache_key)
+            if not os.path.isfile(frame_path):
+                subprocess.run(
+                    [
+                        "ffmpeg", "-y",
+                        "-i", path,
+                        "-vf", "scale=720:1280:force_original_aspect_ratio=increase,crop=720:1280",
+                        "-frames:v", "1",
+                        frame_path,
+                    ],
+                    stdout=subprocess.PIPE,
+                    stderr=subprocess.PIPE,
+                    check=True,
+                )
+            base = Image.open(frame_path).convert("RGB")
+    else:
+        path = session.get("background_path")
+        if not path or not os.path.isfile(path):
+            base = Image.new("RGB", (qv.WIDTH, qv.HEIGHT), (10, 10, 10))
+        else:
+            base = Image.open(path).convert("RGB")
+            base = ImageOps.fit(base, (qv.WIDTH, qv.HEIGHT))
+
+    if darkness > 0:
+        offset = int(255 * darkness / 100.0)
+        base = base.point(lambda value: max(0, value - offset))
+
+    return base
+
+
+def build_settings_preview(session, chat_id):
+    """Render a sample ayah with the user's current settings on their background."""
+    settings = session.get("text_settings") or saved_text_settings(chat_id)
+    include_tafsir = bool(session.get("include_tafsir", True))
+
+    os.makedirs(PREVIEW_DIR, exist_ok=True)
+
+    overlay_path = os.path.join(PREVIEW_DIR, "overlay_%s.png" % chat_id)
+
+    qv.create_ayah_image(
+        SAMPLE_AYAH, 1, overlay_path,
+        include_tafsir=include_tafsir,
+        settings=settings,
+    )
+
+    raw_key = (
+        str(session.get("background_kind", "image"))
+        + "|"
+        + str(session.get("background_path", ""))
+    )
+    cache_key = hashlib.md5(raw_key.encode("utf-8")).hexdigest()[:12]
+
+    try:
+        base = _preview_base_image(session, cache_key).convert("RGBA")
+        overlay = Image.open(overlay_path).convert("RGBA")
+        base.alpha_composite(overlay)
+        preview_path = os.path.join(PREVIEW_DIR, "preview_%s.png" % chat_id)
+        base.convert("RGB").save(preview_path)
+        return preview_path
+    finally:
+        try:
+            os.remove(overlay_path)
+        except OSError:
+            pass
+
+
+def send_settings_preview(chat_id, session):
+    """Send the live preview image; never breaks the settings flow."""
+    preview_path = None
+
+    try:
+        preview_path = build_settings_preview(session, chat_id)
+        send_photo(
+            chat_id,
+            preview_path,
+            "👁️ ئەمە شێوازی پێشبینیکراوەی ڕێکخستنەکانتە.",
+        )
+    except Exception as exc:
+        log_exception("SETTINGS PREVIEW FAILED | chat_id=%s" % chat_id, exc)
+    finally:
+        if preview_path:
+            try:
+                os.remove(preview_path)
+            except OSError:
+                pass
+
+
 def keyboard_text_settings(settings=None):
     settings = settings or default_text_settings()
     header_label = "پیشاندانی" if settings.get("show_header", True) else "شاردنەوەی"
@@ -1385,6 +1643,8 @@ def keyboard_text_settings(settings=None):
         [{"text": "👁️ " + header_label + " ناوی سوورەت و ژمارەی ئایەت لە سەرەوە", "callback_data": "toggle_header"}],
         [{"text": ("📌 شاردنەوەی" if settings.get("show_footer_info", True) else "📌 پیشاندانی") + " ناوی سوورەت و ژمارە لە خوارەوە", "callback_data": "toggle_footer_info"}],
         [{"text": "✍️ گۆڕینی دەقی خوارەوە", "callback_data": "footer_text"}],
+        [{"text": "🔤 فۆنتی ئایەت: " + qv.font_label(settings.get("ayah_font", qv.DEFAULT_AYAH_FONT)), "callback_data": "setting:ayah_font"},
+         {"text": "🔡 فۆنتی تەفسیر: " + qv.font_label(settings.get("tafsir_font", qv.DEFAULT_TAFSIR_FONT)), "callback_data": "setting:tafsir_font"}],
         [{"text": "✅ تەواوە، بەردەوام بە", "callback_data": "settings:done"}],
     ]}
 
@@ -1416,11 +1676,6 @@ def keyboard_setting_values(setting):
     return {"inline_keyboard": rows}
 
 
-def keyboard_designs():
-    # دیزاینەکان لە کیبۆرددا نیشان نادرێن؛ دیزاینی بنەڕەتی بەکاردێت.
-    return None
-
-
 def download_telegram_file(file_id, destination):
     info = telegram("getFile", {"file_id": file_id})
     file_path = info.get("file_path")
@@ -1435,31 +1690,95 @@ def download_telegram_file(file_id, destination):
     return destination
 
 
-def prompt_design(chat_id):
-    # لیستی ١٠ دیزاین لابراوە؛ ڕاستەوخۆ بڕۆ بۆ ڕێکخستنی Darkness.
-    session = SESSIONS[chat_id]
-    session["selected_design"] = 1
-    if session.get("background_kind", "image") in ("image", "video"):
-        session["state"] = "darkness"
-        send_message(
-            chat_id,
-            "🌑 ڕێژەی تاریککردنی پاشبنەما بنووسە لە 0 تا 100.\n\n"
-            "0 = تاریککردن نییە\n25 = کەم\n50 = مامناوەند\n"
-            "75 = زۆر\n100 = تەواو تاریک",
-        )
-    else:
-        session["background_darkness"] = 0
-        session["state"] = "design"
-        create_selected_video(chat_id, 1)
+# =========================
+# VIDEO CREATION WITH PROGRESS
+# =========================
+
+def progress_bar(percent):
+    filled = int(round(max(0, min(100, percent)) / 10.0))
+    return "▰" * filled + "▱" * (10 - filled)
 
 
-def create_selected_video(chat_id, design):
+def make_progress_reporter(chat_id):
+    """Builds a progress bar message and updates it in place (throttled)."""
+    state = {"message_id": None, "last_edit": 0.0, "last_percent": -1}
+    lock = threading.Lock()
+
+    def report(percent, label=""):
+        percent = int(max(0, min(100, percent)))
+
+        with lock:
+            is_first = state["message_id"] is None
+            is_final = percent >= 100
+
+            if not is_first and not is_final:
+                if (
+                    time.time() - state["last_edit"] < 2.5
+                    and percent - state["last_percent"] < 8
+                ):
+                    return
+
+            text = (
+                "⏳ دروستکردنی ڤیدیۆ\n\n"
+                + progress_bar(percent)
+                + "  %d%%\n" % percent
+            )
+
+            if label:
+                text += label + "\n"
+
+            try:
+                if is_first:
+                    result = send_message(chat_id, text)
+                    state["message_id"] = (result or {}).get("message_id")
+                else:
+                    edit_message(chat_id, state["message_id"], text)
+
+                state["last_edit"] = time.time()
+                state["last_percent"] = percent
+            except Exception as exc:
+                log_error(
+                    "PROGRESS UPDATE FAILED | chat_id=%s | %r"
+                    % (chat_id, exc)
+                )
+
+    return report
+
+
+def create_selected_video(chat_id):
     session = SESSIONS.get(chat_id)
     if not session or session.get("state") != "design":
         send_message(chat_id, "داواکارییەکەت بەسەرچووە؛ /start بنووسە.")
         return
+
+    with _ACTIVE_JOBS_LOCK:
+        if chat_id in ACTIVE_JOBS:
+            send_message(
+                chat_id,
+                "⚠️ ڤیدیۆیەکی تر بۆ تۆ لە دروستکردندایە.\n"
+                "تکایە چاوەڕێ بکە تا ئەمە تەواو دەبێت.",
+            )
+            return
+        ACTIVE_JOBS.add(chat_id)
+
     job_dir = None
+    slot_acquired = False
+
     try:
+        # Limit how many videos are built at the same time; extra
+        # requests wait in a queue instead of blocking everyone.
+        if not JOB_SLOTS.acquire(blocking=False):
+            send_message(
+                chat_id,
+                "🕒 ئێستا %d داواکاری بە یەک کات جێبەجێ دەکرێن و "
+                "هەموو شوێنەکان پڕن.\n"
+                "داواکاریەکەت خرایە نۆرەوە و بەم زووانە دەست پێ دەکات."
+                % MAX_CONCURRENT_JOBS,
+            )
+            JOB_SLOTS.acquire()
+
+        slot_acquired = True
+
         surah_number = int(session["surah_number"])
         start_ayah = int(session["start_ayah"])
         end_ayah = int(session["end_ayah"])
@@ -1467,17 +1786,23 @@ def create_selected_video(chat_id, design):
         ayahs = find_surah_rows(surah_number, start_ayah, end_ayah)
         surah = next(s for s in get_surahs() if int(s["number"]) == surah_number)
         reciter_name = RECITERS[reciter_id]["name"]
-        send_message(chat_id, "⏳ ڤیدیۆکەت دروست دەکەم...\n🎙️ قاری: %s\nسوورەت: %s\nئایەتەکان: %d–%d\n🎨 دیزاین: ١ (بنەڕەتی)\n🌑 تاریککردن: %d%%\nتکایە چاوەڕێ بکە." % (reciter_name, surah["name"], start_ayah, end_ayah, int(session.get("background_darkness", 0))))
+
+        progress = make_progress_reporter(chat_id)
+        progress(2, "داواکاریەکەت تۆمار کرا")
+
         video_path, job_dir = build_video(
             chat_id, ayahs, reciter_id,
-            design=design,
             background_path=session.get("background_path"),
             background_kind=session.get("background_kind", "image"),
             background_darkness=int(session.get("background_darkness", 0)),
             include_tafsir=bool(session.get("include_tafsir", True)),
             text_settings=session.get("text_settings", {}),
+            progress=progress,
         )
+
+        progress(93, "ناردنی ڤیدیۆ بۆ تۆ...")
         send_video(chat_id, video_path, "قورئانی پیرۆز — %s\nقاری: %s\nئایەت %d–%d" % (surah["name"], reciter_name, start_ayah, end_ayah))
+        progress(100, "✅ تەواو بوو!")
         send_message(chat_id, "✅ ڤیدیۆکە بە سەرکەوتوویی بۆ تۆ نێردرا.")
     except Exception as exc:
         log_exception("VIDEO CREATION ERROR | chat_id=%s" % chat_id, exc)
@@ -1486,7 +1811,14 @@ def create_selected_video(chat_id, design):
         except Exception as send_exc:
             log_exception("Could not send error to Telegram", send_exc)
     finally:
-        SESSIONS.pop(chat_id, None)
+        if slot_acquired:
+            JOB_SLOTS.release()
+        with _ACTIVE_JOBS_LOCK:
+            ACTIVE_JOBS.discard(chat_id)
+        # Only remove the session if the user has not started a new
+        # flow (e.g. /start) while this job was running.
+        if SESSIONS.get(chat_id) is session:
+            SESSIONS.pop(chat_id, None)
         if job_dir:
             shutil.rmtree(job_dir, ignore_errors=True)
 
@@ -1502,12 +1834,18 @@ def start(chat_id, user_id=None):
 
     SESSIONS[chat_id] = {"state": "reciter", "text_settings": saved_text_settings(chat_id)}
 
-    send_message(
-        chat_id,
+    welcome = (
         "بەخێربێیت 🌙\n\n"
-        "🎙️ سەرەتا قاریی دڵخوازی خۆت هەڵبژێرە:",
-        keyboard_reciters(),
+        "🎙️ سەرەتا قاریی دڵخوازی خۆت هەڵبژێرە:"
     )
+
+    if chat_id in ACTIVE_JOBS:
+        welcome = (
+            "⚠️ تێبینی: ڤیدیۆیەکی تر بۆ تۆ لە دروستکردندایە و "
+            "کاتێک ئامادە بوو بۆت دەنێردرێت.\n\n" + welcome
+        )
+
+    send_message(chat_id, welcome, keyboard_reciters())
 
 
 def handle_message(message):
@@ -1607,7 +1945,8 @@ def handle_message(message):
         settings["footer_text"] = footer
         session["state"] = "text_settings"
         save_text_settings(chat_id, settings)
-        send_message(chat_id, "✅ دەقی خوارەوە گۆڕدرا و پاشەکەوت کرا.", keyboard_text_settings(settings))
+        send_message(chat_id, "✅ دەقی خوارەوە گۆڕدرا و پاشەکەوت کرا. پێشبینینێکت بۆ ناردم:", keyboard_text_settings(settings))
+        send_settings_preview(chat_id, session)
         return
 
     if session.get("state") == "darkness":
@@ -1619,7 +1958,7 @@ def handle_message(message):
                 raise ValueError
             session["background_darkness"] = darkness
             session["state"] = "design"
-            create_selected_video(chat_id, int(session.get("selected_design", 1)))
+            create_selected_video(chat_id)
         except ValueError:
             send_message(chat_id, "❌ ژمارەکە دروست نییە. تەنها ژمارەیەک لە 0 تا 100 بنووسە.")
         return
@@ -1801,7 +2140,8 @@ def handle_callback(callback):
             session["text_settings"] = saved_text_settings(chat_id)
             session["state"] = "text_settings"
             answer_callback(callback_id, "هەڵبژێردرا")
-            send_message(chat_id, "🎨 ڕێکخستنی دەق: ڕەنگ، قەبارە، پیشاندانی ناو و ژمارە، و دەقی خوارەوە دیاری بکە. ڕێکخستنەکان پاشەکەوت دەکرێن.", keyboard_text_settings(session["text_settings"]))
+            send_message(chat_id, "🎨 ڕێکخستنی دەق: ڕەنگ، قەبارە و فۆنت دیاری بکە. دوای هەر گۆڕانکارییەک پێشبینینێکت بۆ دەنێرم. ڕێکخستنەکان پاشەکەوت دەکرێن.", keyboard_text_settings(session["text_settings"]))
+            send_settings_preview(chat_id, session)
             return
 
         if data.startswith("setting:"):
@@ -1810,16 +2150,29 @@ def handle_callback(callback):
             if not session or session.get("state") != "text_settings":
                 raise ValueError("تکایە /start دووبارە بکە.")
             answer_callback(callback_id)
-            send_message(chat_id, "هەڵبژاردەی خۆت بۆ %s دیاری بکە:" % setting, keyboard_setting_values(setting))
+            label = SETTING_LABELS.get(setting, setting)
+            if setting in ("ayah_font", "tafsir_font"):
+                current = (session.get("text_settings") or {}).get(setting)
+                send_message(chat_id, "🔤 فۆنتی دڵخوازی خۆت بۆ %s هەڵبژێرە:" % label, keyboard_fonts(setting, current))
+            else:
+                send_message(chat_id, "هەڵبژاردەی خۆت بۆ %s دیاری بکە:" % label, keyboard_setting_values(setting))
             return
 
         if data.startswith("setval:"):
             _, setting, raw = data.split(":", 2)
             session = SESSIONS.get(chat_id)
-            allowed = {"ayah_color", "tafsir_color", "ayah_size", "tafsir_size", "other_size", "ayah_y", "tafsir_y", "footer_size"}
+            allowed = {
+                "ayah_color", "tafsir_color", "ayah_size", "tafsir_size",
+                "other_size", "ayah_y", "tafsir_y", "footer_size",
+                "ayah_font", "tafsir_font",
+            }
             if not session or session.get("state") != "text_settings" or setting not in allowed:
                 raise ValueError("ڕێکخستنەکە دروست نییە.")
-            if setting.endswith("color"):
+            if setting in ("ayah_font", "tafsir_font"):
+                if raw not in qv.FONT_FILES:
+                    raise ValueError("فۆنتەکە دروست نییە.")
+                value = raw
+            elif setting.endswith("color"):
                 value = tuple(int(x) for x in raw.split(","))
                 if len(value) != 3 or any(x < 0 or x > 255 for x in value): raise ValueError("ڕەنگی دروست نییە.")
             else:
@@ -1827,7 +2180,8 @@ def handle_callback(callback):
             session.setdefault("text_settings", default_text_settings())[setting] = value
             save_text_settings(chat_id, session["text_settings"])
             answer_callback(callback_id, "ڕێکخستن هەڵگیرا")
-            send_message(chat_id, "✅ ڕێکخستنەکە گۆڕدرا و پاشەکەوت کرا. دەتوانیت ڕێکخستنێکی تر هەڵبژێریت:", keyboard_text_settings(session["text_settings"]))
+            send_message(chat_id, "✅ %s گۆڕدرا و پاشەکەوت کرا. پێشبینینێکت بۆ ناردم:" % SETTING_LABELS.get(setting, setting), keyboard_text_settings(session["text_settings"]))
+            send_settings_preview(chat_id, session)
             return
 
         if data == "toggle_header":
@@ -1841,6 +2195,7 @@ def handle_callback(callback):
             save_text_settings(chat_id, settings)
             answer_callback(callback_id, "ڕێکخستن پاشەکەوت کرا")
             send_message(chat_id, "🎨 ڕێکخستنی دەق:", keyboard_text_settings(settings))
+            send_settings_preview(chat_id, session)
             return
 
         if data == "toggle_footer_info":
@@ -1854,6 +2209,7 @@ def handle_callback(callback):
             save_text_settings(chat_id, settings)
             answer_callback(callback_id, "ڕێکخستن پاشەکەوت کرا")
             send_message(chat_id, "🎨 ڕێکخستنی دەق:", keyboard_text_settings(settings))
+            send_settings_preview(chat_id, session)
             return
 
         if data == "footer_text":
@@ -1876,7 +2232,6 @@ def handle_callback(callback):
             if not session or session.get("state") != "text_settings":
                 raise ValueError("تکایە /start دووبارە بکە.")
             save_text_settings(chat_id, session.get("text_settings", default_text_settings()))
-            session["selected_design"] = 1
             answer_callback(callback_id, "ڕێکخستنەکان هەڵگیرا")
             if session.get("background_kind", "image") in ("image", "video"):
                 session["state"] = "darkness"
@@ -1889,7 +2244,7 @@ def handle_callback(callback):
             else:
                 session["background_darkness"] = 0
                 session["state"] = "design"
-                create_selected_video(chat_id, 1)
+                create_selected_video(chat_id)
             return
 
         if data == "change_reciter":
@@ -2016,6 +2371,80 @@ def handle_callback(callback):
 
 
 # =========================
+# PER-CHAT WORKERS (concurrent users)
+# =========================
+
+class _ChatWorker:
+    """Processes one chat's updates in order, while different chats run in parallel."""
+
+    def __init__(self):
+        self._queue = queue.Queue()
+        self._thread = None
+        self._start_lock = threading.Lock()
+
+    def submit(self, job):
+        with self._start_lock:
+            if self._thread is None:
+                self._thread = threading.Thread(
+                    target=self._run,
+                    daemon=True,
+                )
+                self._thread.start()
+
+        self._queue.put(job)
+
+    def _run(self):
+        while True:
+            job = self._queue.get()
+
+            try:
+                job()
+            except Exception as exc:
+                log_exception("CHAT WORKER ERROR", exc)
+            finally:
+                self._queue.task_done()
+
+
+_CHAT_WORKERS = {}
+_CHAT_WORKERS_GUARD = threading.Lock()
+
+
+def chat_worker(chat_id):
+    with _CHAT_WORKERS_GUARD:
+        return _CHAT_WORKERS.setdefault(chat_id, _ChatWorker())
+
+
+def process_update(update):
+    """Dispatch each update to its chat worker so multiple users never block each other."""
+    if "message" in update:
+        message = update["message"]
+        chat_id = message.get("chat", {}).get("id")
+
+        if chat_id is None:
+            return
+
+        chat_worker(chat_id).submit(
+            lambda m=message: handle_message(m)
+        )
+
+    elif "callback_query" in update:
+        callback = update["callback_query"]
+        chat_id = callback.get("message", {}).get("chat", {}).get("id")
+
+        if chat_id is None:
+            threading.Thread(
+                target=handle_callback,
+                args=(callback,),
+                daemon=True,
+            ).start()
+            return
+
+        chat_worker(chat_id).submit(
+            lambda c=callback: handle_callback(c)
+        )
+
+
+# =========================
 # MAIN LOOP
 # =========================
 
@@ -2071,11 +2500,9 @@ def main():
             for update in updates:
                 offset = update["update_id"] + 1
 
-                if "message" in update:
-                    handle_message(update["message"])
-
-                elif "callback_query" in update:
-                    handle_callback(update["callback_query"])
+                # Hand the update to its per-chat worker thread, so a
+                # slow video job for one user never blocks other users.
+                process_update(update)
 
         except KeyboardInterrupt:
             log_error("Bot stopped by keyboard interrupt.")

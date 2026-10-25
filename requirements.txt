@@ -1,5 +1,1 @@
-
 Pillow
-moviepy
-arabic-reshaper
-python-bidi
