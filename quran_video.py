@@ -55,9 +55,9 @@ FONT_FILES = {
     "quran1": {"file": "fonts/quran1.ttf", "name": "قورئان ١"},
     "quran2": {"file": "fonts/quran2.ttf", "name": "قورئان ٢"},
     "quran3": {"file": "fonts/quran3.ttf", "name": "قورئان ٣"},
-    "rabar1": {"file": "fonts/rabar1.ttf", "name": "شێوەی ١"},
-    "rabar2": {"file": "fonts/rabar2.ttf", "name": "شێوەی ٢"},
-    "rabar3": {"file": "fonts/rabar3.ttf", "name": "شێوەی ٣"},
+    "rabar1": {"file": "fonts/rabar1.ttf", "name": "نووسین ١"},
+    "rabar2": {"file": "fonts/rabar2.ttf", "name": "نووسین ٢"},
+    "rabar3": {"file": "fonts/rabar3.ttf", "name": "نووسین ٣"},
 }
 
 DEFAULT_AYAH_FONT = "quran1"
@@ -72,6 +72,24 @@ FONT_MIGRATION = {
 
 # "custom" means: the user uploaded their own font file from their phone.
 CUSTOM_FONT_KEY = "custom"
+
+
+# =========================
+# AYAH NUMBER LANGUAGE (English 123 / Kurdish ١٢٣)
+# =========================
+
+# "en" -> 123 (English digits), "ku" -> ١٢٣ (Kurdish/Arabic-Indic digits).
+NUMBER_LANGS = ("en", "ku")
+
+_EASTERN_DIGIT_MAP = str.maketrans("0123456789", "٠١٢٣٤٥٦٧٨٩")
+
+
+def format_number(value, lang="en"):
+    """Render a number with English (123) or Kurdish (١٢٣) digits."""
+    text = str(value)
+    if lang == "ku":
+        return text.translate(_EASTERN_DIGIT_MAP)
+    return text
 
 
 def normalize_font_key(key):
@@ -502,6 +520,11 @@ def create_text_overlay(ayah, index, image_path, include_tafsir=True, settings=N
     show_info = bool(settings.get("show_surah_info", True))
     info_pos = str(settings.get("surah_info_pos", "bottom") or "bottom").lower()
 
+    # Ayah-number digit language: English (123) or Kurdish (١٢٣).
+    number_lang = str(settings.get("number_lang", "en") or "en").lower()
+    if number_lang not in NUMBER_LANGS:
+        number_lang = "en"
+
     if info_pos not in ("top", "bottom"):
         info_pos = "bottom"
 
@@ -509,7 +532,7 @@ def create_text_overlay(ayah, index, image_path, include_tafsir=True, settings=N
         draw.text((WIDTH // 2, other_y), shape_rtl(str(ayah.get("surah_name", ""))),
                   font=make_tafsir_font(other_size, tafsir_font_key, tafsir_custom), fill=other_color, anchor="mm", direction="rtl", language="ar")
         if settings.get("show_ayah_number", True):
-            draw.text((WIDTH // 2, other_y + other_size + 12), shape_rtl("ئایەتی " + str(ayah.get("ayah_number", ""))),
+            draw.text((WIDTH // 2, other_y + other_size + 12), shape_rtl("ئایەتی " + format_number(ayah.get("ayah_number", ""), number_lang)),
                       font=make_tafsir_font(max(12, other_size - 3), tafsir_font_key, tafsir_custom), fill=other_color, anchor="mm", direction="rtl", language="ar")
     surah_number = int(ayah.get("surah_number", 0) or 0)
     ayah_number = int(ayah.get("ayah_number", 0) or 0)
@@ -571,7 +594,7 @@ def create_text_overlay(ayah, index, image_path, include_tafsir=True, settings=N
             )
             draw.text(
                 (WIDTH // 2, ayah_y_footer),
-                shape_rtl("ژمارەی ئایەت: " + str(ayah.get("ayah_number", ""))),
+                shape_rtl("ژمارەی ئایەت: " + format_number(ayah.get("ayah_number", ""), number_lang)),
                 font=make_tafsir_font(max(12, info_size - 2), tafsir_font_key, tafsir_custom),
                 fill=other_color,
                 anchor="mm",

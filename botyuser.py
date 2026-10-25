@@ -107,6 +107,10 @@ def default_text_settings():
         "footer_size": 34,
         "ayah_font": qv.DEFAULT_AYAH_FONT,
         "tafsir_font": qv.DEFAULT_TAFSIR_FONT,
+        # Language of the ayah number: "en" (123) or "ku" (١٢٣).
+        "number_lang": "en",
+        # Background darkening percentage 0..100 (set from the settings menu).
+        "background_darkness": 0,
     }
 
 
@@ -149,6 +153,16 @@ def saved_text_settings(chat_id):
 
         settings[slot] = key if key and key != qv.CUSTOM_FONT_KEY else fallback
         settings.pop(slot + "_custom", None)
+
+    # --- Validate the ayah-number language and the background darkness ---
+    number_lang = str(settings.get("number_lang", "en") or "en").lower()
+    settings["number_lang"] = number_lang if number_lang in qv.NUMBER_LANGS else "en"
+
+    try:
+        darkness = max(0, min(100, int(settings.get("background_darkness", 0) or 0)))
+    except (TypeError, ValueError):
+        darkness = 0
+    settings["background_darkness"] = darkness
 
     for key in ("ayah_color", "tafsir_color", "other_color"):
         value = settings.get(key)
@@ -1513,7 +1527,7 @@ def color_label(value):
 
 # Kurdish labels of the font options, exactly as the user sees them:
 #   ayah_font  ->  فۆنتی:  قورئان ١ / قورئان ٢ / قورئان ٣ / خۆت فۆنت هەڵبژێرە
-#   tafsir_font -> شێوەی:  شێوەی ١ / شێوەی ٢ / شێوەی ٣ / خۆت فۆنت هەڵبژێرە
+#   tafsir_font -> فۆنتی:  نووسین ١ / نووسین ٢ / نووسین ٣ / خۆت فۆنت هەڵبژێرە
 FONT_OPTIONS = {
     "ayah_font": [
         ("quran1", "قورئان ١"),
@@ -1521,9 +1535,9 @@ FONT_OPTIONS = {
         ("quran3", "قورئان ٣"),
     ],
     "tafsir_font": [
-        ("rabar1", "شێوەی ١"),
-        ("rabar2", "شێوەی ٢"),
-        ("rabar3", "شێوەی ٣"),
+        ("rabar1", "نووسین ١"),
+        ("rabar2", "نووسین ٢"),
+        ("rabar3", "نووسین ٣"),
     ],
 }
 
@@ -1533,7 +1547,7 @@ CUSTOM_FONT_LABEL = "فۆنتی خۆم"
 
 def font_value_label(setting, key):
     """Kurdish name of the currently selected font (for the settings row)."""
-    default = "قورئان ١" if setting == "ayah_font" else "شێوەی ١"
+    default = "قورئان ١" if setting == "ayah_font" else "نووسین ١"
 
     if key == qv.CUSTOM_FONT_KEY:
         return CUSTOM_FONT_LABEL
@@ -1544,10 +1558,10 @@ def font_value_label(setting, key):
 
     name = qv.FONT_FILES[normalized]["name"]
 
-    # Never show a Quran font name inside the style slot (or vice versa).
+    # Never show a Quran font name inside the tafsir slot (or vice versa).
     if setting == "ayah_font" and not name.startswith("قورئان"):
         return default
-    if setting == "tafsir_font" and not name.startswith("شێوەی"):
+    if setting == "tafsir_font" and not name.startswith("نووسین"):
         return default
 
     return name
@@ -1624,7 +1638,8 @@ SETTING_LABELS = {
     "ayah_y": "شوێنی ئایەت",
     "tafsir_y": "شوێنی تەفسیر",
     "ayah_font": "فۆنتی",
-    "tafsir_font": "شێوەی",
+    "tafsir_font": "فۆنتی",
+    "number_lang": "ژمارەی ئایەت",
 }
 
 
@@ -1646,7 +1661,11 @@ SAMPLE_AYAH = {
 def _preview_base_image(session, cache_key):
     """720x1280 PIL image of the chosen background, darkened like the video."""
     kind = session.get("background_kind", "image")
-    darkness = max(0, min(100, int(session.get("background_darkness", 0) or 0)))
+    # Darkness lives in text_settings now (the 🌑 button in the settings menu).
+    darkness = (session.get("text_settings") or {}).get(
+        "background_darkness", session.get("background_darkness", 0)
+    )
+    darkness = max(0, min(100, int(darkness or 0)))
 
     if kind == "black":
         base = Image.new("RGB", (qv.WIDTH, qv.HEIGHT), (0, 0, 0))
@@ -1747,6 +1766,12 @@ def keyboard_text_settings(settings=None):
     settings = settings or default_text_settings()
     info_state = "✅ نیشان دەدرێت" if settings.get("show_surah_info", True) else "❌ شاراوەتەوە"
     info_pos = "⬆️ سەرەوە" if settings.get("surah_info_pos", "bottom") == "top" else "⬇️ خوارەوە"
+    number_lang = settings.get("number_lang", "en")
+    number_label = "کوردی (١٢٣)" if number_lang == "ku" else "English (123)"
+    try:
+        darkness = max(0, min(100, int(settings.get("background_darkness", 0) or 0)))
+    except (TypeError, ValueError):
+        darkness = 0
     return {"inline_keyboard": [
         [{"text": "🎨 ڕەنگی ئایەت: " + color_label(settings.get("ayah_color", (255,255,255))), "callback_data": "setting:ayah_color"},
          {"text": "🟡 ڕەنگی تەفسیر: " + color_label(settings.get("tafsir_color", (255,210,90))), "callback_data": "setting:tafsir_color"}],
@@ -1759,9 +1784,11 @@ def keyboard_text_settings(settings=None):
         # ONE switch + ONE position for the surah name (was two toggles before).
         [{"text": "👁️ ناوی سوورەت و ژمارەی ئایەت: " + info_state, "callback_data": "toggle_surah_info"}],
         [{"text": "📍 شوێنی ناوی سوورەت: " + info_pos, "callback_data": "toggle_surah_info_pos"}],
+        [{"text": "🔢 ژمارەی ئایەت: " + number_label, "callback_data": "setting:number_lang"}],
         [{"text": "✍️ گۆڕینی دەقی خوارەوە", "callback_data": "footer_text"}],
+        [{"text": "🌑 تاریککردنی پاشبنەما: %d%%" % darkness, "callback_data": "setting:background_darkness"}],
         [{"text": "🔤 فۆنتی: " + font_value_label("ayah_font", settings.get("ayah_font", qv.DEFAULT_AYAH_FONT)), "callback_data": "setting:ayah_font"},
-         {"text": "✍️ شێوەی: " + font_value_label("tafsir_font", settings.get("tafsir_font", qv.DEFAULT_TAFSIR_FONT)), "callback_data": "setting:tafsir_font"}],
+         {"text": "✍️ فۆنتی: " + font_value_label("tafsir_font", settings.get("tafsir_font", qv.DEFAULT_TAFSIR_FONT)), "callback_data": "setting:tafsir_font"}],
         [{"text": "✅ تەواوە، بەردەوام بە", "callback_data": "settings:done"}],
     ]}
 
@@ -1784,6 +1811,7 @@ def keyboard_setting_values(setting):
         "footer_size": [("بچووک", 24), ("مامناوەند", 34), ("گەورە", 38), ("زۆر گەورە", 42)],
         "ayah_y": [("سەرەوە", 190), ("ناوەڕاست", 300), ("خوارەوە", 420)],
         "tafsir_y": [("ناوەڕاست", 600), ("خوارەوە", 730), ("زۆر خوارەوە", 830)],
+        "number_lang": [("English (123)", "en"), ("کوردی (١٢٣)", "ku")],
     }
     rows = []
     for label, value in choices[setting]:
@@ -1911,7 +1939,9 @@ def create_selected_video(chat_id):
             chat_id, ayahs, reciter_id,
             background_path=session.get("background_path"),
             background_kind=session.get("background_kind", "image"),
-            background_darkness=int(session.get("background_darkness", 0)),
+            background_darkness=int(
+                max(0, min(100, int((session.get("text_settings") or {}).get("background_darkness", 0) or 0)))
+            ),
             include_tafsir=bool(session.get("include_tafsir", True)),
             text_settings=session.get("text_settings", {}),
             progress=progress,
@@ -2161,18 +2191,27 @@ def handle_message(message):
         send_settings_preview(chat_id, session)
         return
 
-    if session.get("state") == "darkness":
+    if session.get("state") == "darkness_setting":
+        # The 🌑 darkness option now lives inside the text settings menu:
+        # the answer only saves + previews, it does not start the video.
         try:
             digit_map = str.maketrans("٠١٢٣٤٥٦٧٨٩۰۱۲۳۴۵۶۷۸۹", "01234567890123456789")
-            darkness_text = text.translate(digit_map).strip()
-            darkness = int(darkness_text)
+            darkness = int(text.translate(digit_map).strip())
             if darkness < 0 or darkness > 100:
                 raise ValueError
-            session["background_darkness"] = darkness
-            session["state"] = "design"
-            create_selected_video(chat_id)
-        except ValueError:
+        except (TypeError, ValueError):
             send_message(chat_id, "❌ ژمارەکە دروست نییە. تەنها ژمارەیەک لە 0 تا 100 بنووسە.")
+            return
+        settings = session.setdefault("text_settings", saved_text_settings(chat_id))
+        settings["background_darkness"] = darkness
+        save_text_settings(chat_id, settings)
+        session["state"] = "text_settings"
+        send_message(
+            chat_id,
+            "✅ تاریککردنی پاشبنەما گۆڕدرا و پاشەکەوت کرا. پێشبینینێکت بۆ ناردم:",
+            keyboard_text_settings(settings),
+        )
+        send_settings_preview(chat_id, session)
         return
 
     if session.get("state") == "start_ayah":
@@ -2368,7 +2407,17 @@ def handle_callback(callback):
                 send_message(chat_id, "🔤 فۆنتی هەڵبژێرە (فۆنتی قورئان):", keyboard_fonts(setting, current))
             elif setting == "tafsir_font":
                 current = (session.get("text_settings") or {}).get(setting)
-                send_message(chat_id, "✍️ شێوەی نووسین هەڵبژێرە (فۆنتی تەفسیر):", keyboard_fonts(setting, current))
+                send_message(chat_id, "✍️ فۆنتی نووسین هەڵبژێرە (فۆنتی تەفسیر):", keyboard_fonts(setting, current))
+            elif setting == "background_darkness":
+                # 🌑 moved here from the old post-settings question.
+                session["state"] = "darkness_setting"
+                send_message(
+                    chat_id,
+                    "🌑 ڕێژەی تاریککردنی پاشبنەما بنووسە لە 0 تا 100.\n\n"
+                    "0 = تاریککردن نییە\n25 = کەم\n50 = مامناوەند\n"
+                    "75 = زۆر\n100 = تەواو تاریک",
+                    {"inline_keyboard": [[{"text": "↩️ گەڕانەوە بۆ ڕێکخستن", "callback_data": "settings:back"}]]},
+                )
             else:
                 send_message(chat_id, "هەڵبژاردەی خۆت بۆ %s دیاری بکە:" % label, keyboard_setting_values(setting))
             return
@@ -2379,7 +2428,7 @@ def handle_callback(callback):
             allowed = {
                 "ayah_color", "tafsir_color", "ayah_size", "tafsir_size",
                 "other_size", "ayah_y", "tafsir_y", "footer_size",
-                "ayah_font", "tafsir_font",
+                "ayah_font", "tafsir_font", "number_lang",
             }
             if not session or session.get("state") != "text_settings" or setting not in allowed:
                 raise ValueError("ڕێکخستنەکە دروست نییە.")
@@ -2398,6 +2447,11 @@ def handle_callback(callback):
                     return
                 if qv.normalize_font_key(raw) != raw:
                     raise ValueError("فۆنتەکە دروست نییە.")
+                value = raw
+            elif setting == "number_lang":
+                # Ayah-number digit language: English (123) or Kurdish (١٢٣).
+                if raw not in qv.NUMBER_LANGS:
+                    raise ValueError("هەڵبژاردەی ژمارە دروست نییە.")
                 value = raw
             elif setting.endswith("color"):
                 value = tuple(int(x) for x in raw.split(","))
@@ -2451,8 +2505,9 @@ def handle_callback(callback):
         if data == "settings:back":
             answer_callback(callback_id)
             session = SESSIONS.get(chat_id)
-            # Leaving the "upload your font" step returns to the settings menu.
-            if session and session.get("state") == "await_font":
+            # Leaving the "upload your font" or the "background darkness"
+            # step returns to the settings menu.
+            if session and session.get("state") in ("await_font", "darkness_setting"):
                 session["state"] = "text_settings"
                 session.pop("font_slot", None)
             send_message(chat_id, "🎨 ڕێکخستنی دەق:", keyboard_text_settings((session or {}).get("text_settings", saved_text_settings(chat_id))))
@@ -2464,18 +2519,10 @@ def handle_callback(callback):
                 raise ValueError("تکایە /start دووبارە بکە.")
             save_text_settings(chat_id, session.get("text_settings", default_text_settings()))
             answer_callback(callback_id, "ڕێکخستنەکان هەڵگیرا")
-            if session.get("background_kind", "image") in ("image", "video"):
-                session["state"] = "darkness"
-                send_message(
-                    chat_id,
-                    "🌑 ڕێژەی تاریککردنی پاشبنەما بنووسە لە 0 تا 100.\n\n"
-                    "0 = تاریککردن نییە\n25 = کەم\n50 = مامناوەند\n"
-                    "75 = زۆر\n100 = تەواو تاریک",
-                )
-            else:
-                session["background_darkness"] = 0
-                session["state"] = "design"
-                create_selected_video(chat_id)
+            # The 🌑 darkness value is already set inside the settings menu,
+            # so no extra question here — build the video right away.
+            session["state"] = "design"
+            create_selected_video(chat_id)
             return
 
         if data == "change_reciter":
