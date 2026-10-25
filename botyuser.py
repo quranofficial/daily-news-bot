@@ -16,7 +16,7 @@ import urllib.request
 import urllib.parse
 import urllib.error
 
-from PIL import Image, ImageOps
+from PIL import Image, ImageFont, ImageOps
 
 import quran_video as qv
 
@@ -36,6 +36,7 @@ POLL_TIMEOUT = 30
 
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
 JOBS_DIR = os.path.join(BASE_DIR, "quran_user_jobs")
+USER_FONTS_DIR = os.path.join(JOBS_DIR, "user_fonts")
 TIMINGS_DIR = os.path.join(BASE_DIR, "reciter_timings")
 BACKGROUND_DIR = BASE_DIR
 BACKGROUND_BASE_URL = "https://raw.githubusercontent.com/quranofficial/daily-news-bot/main/"
@@ -99,8 +100,9 @@ def default_text_settings():
         "ayah_y": 250,
         "tafsir_y": 690,
         "other_y": 115,
-        "show_header": False,
-        "show_footer_info": True,
+        # ONE switch for the surah name + ONE position choice (top/bottom).
+        "show_surah_info": True,
+        "surah_info_pos": "bottom",
         "footer_text": "قورئانی پیرۆز - ڕێگای ئیسلام",
         "footer_size": 34,
         "ayah_font": qv.DEFAULT_AYAH_FONT,
@@ -119,10 +121,35 @@ def saved_text_settings(chat_id):
     settings.update(prefs.get("text_settings", {}))
     # Keep the transparent text-only overlay so the selected background remains visible.
     settings["plain_overlay"] = True
-    settings.setdefault("show_footer_info", True)
-    # Surah name and ayah number may appear at the top OR bottom, never both.
-    if settings.get("show_header", False) and settings.get("show_footer_info", True):
-        settings["show_header"] = False
+
+    # --- Migration: the old two surah-name toggles became ONE switch + position ---
+    # (defaults already contain the new keys, so the OLD keys are the signal)
+    if "show_header" in settings or "show_footer_info" in settings:
+        header = bool(settings.get("show_header", False))
+        footer = bool(settings.get("show_footer_info", True))
+        settings["show_surah_info"] = header or footer
+        settings["surah_info_pos"] = "top" if header else "bottom"
+    settings.pop("show_header", None)
+    settings.pop("show_footer_info", None)
+
+    position = str(settings.get("surah_info_pos", "bottom")).lower()
+    settings["surah_info_pos"] = position if position in ("top", "bottom") else "bottom"
+    settings["show_surah_info"] = bool(settings.get("show_surah_info", True))
+
+    # --- Migration: font keys of old versions -> the new fonts/ set ---
+    for slot, fallback in (
+        ("ayah_font", qv.DEFAULT_AYAH_FONT),
+        ("tafsir_font", qv.DEFAULT_TAFSIR_FONT),
+    ):
+        key = qv.normalize_font_key(settings.get(slot))
+        custom_path = settings.get(slot + "_custom")
+
+        if key == qv.CUSTOM_FONT_KEY and custom_path and os.path.isfile(custom_path):
+            continue  # uploaded font still exists on the server
+
+        settings[slot] = key if key and key != qv.CUSTOM_FONT_KEY else fallback
+        settings.pop(slot + "_custom", None)
+
     for key in ("ayah_color", "tafsir_color", "other_color"):
         value = settings.get(key)
         if isinstance(value, list):
@@ -1481,22 +1508,110 @@ def color_label(value):
 
 
 # =========================
-# FONT SELECTION (3 fonts)
+# FONT SELECTION (3 Quran fonts + 3 text styles + your own font)
 # =========================
 
+# Kurdish labels of the font options, exactly as the user sees them:
+#   ayah_font  ->  فۆنتی:  قورئان ١ / قورئان ٢ / قورئان ٣ / خۆت فۆنت هەڵبژێرە
+#   tafsir_font -> شێوەی:  شێوەی ١ / شێوەی ٢ / شێوەی ٣ / خۆت فۆنت هەڵبژێرە
+FONT_OPTIONS = {
+    "ayah_font": [
+        ("quran1", "قورئان ١"),
+        ("quran2", "قورئان ٢"),
+        ("quran3", "قورئان ٣"),
+    ],
+    "tafsir_font": [
+        ("rabar1", "شێوەی ١"),
+        ("rabar2", "شێوەی ٢"),
+        ("rabar3", "شێوەی ٣"),
+    ],
+}
+
+CUSTOM_FONT_BUTTON = "📤 خۆت فۆنت هەڵبژێرە"
+CUSTOM_FONT_LABEL = "فۆنتی خۆم"
+
+
+def font_value_label(setting, key):
+    """Kurdish name of the currently selected font (for the settings row)."""
+    default = "قورئان ١" if setting == "ayah_font" else "شێوەی ١"
+
+    if key == qv.CUSTOM_FONT_KEY:
+        return CUSTOM_FONT_LABEL
+
+    normalized = qv.normalize_font_key(key)
+    if not normalized:
+        return default
+
+    name = qv.FONT_FILES[normalized]["name"]
+
+    # Never show a Quran font name inside the style slot (or vice versa).
+    if setting == "ayah_font" and not name.startswith("قورئان"):
+        return default
+    if setting == "tafsir_font" and not name.startswith("شێوەی"):
+        return default
+
+    return name
+
+
 def keyboard_fonts(setting, current=None):
-    """Keyboard for choosing one of the 3 fonts."""
+    """Keyboard: 3 ready-made fonts + 'choose your own font' (upload)."""
     rows = []
 
-    for key, info in qv.FONT_FILES.items():
+    for key, label in FONT_OPTIONS.get(setting, []):
         mark = " ✔" if current == key else ""
         rows.append([{
-            "text": "🔤 " + info["name"] + mark,
+            "text": "🔤 " + label + mark,
             "callback_data": "setval:%s:%s" % (setting, key),
         }])
 
+    mark = " ✔" if current == qv.CUSTOM_FONT_KEY else ""
+    rows.append([{
+        "text": CUSTOM_FONT_BUTTON + mark,
+        "callback_data": "setval:%s:%s" % (setting, qv.CUSTOM_FONT_KEY),
+    }])
+
     rows.append([{"text": "↩️ گەڕانەوە بۆ ڕێکخستن", "callback_data": "settings:back"}])
     return {"inline_keyboard": rows}
+
+
+def validate_font_file(path, require_kurdish):
+    """Check that an uploaded file really is a usable font.
+
+    Returns the list of missing letters (may be empty), or None when the
+    fontTools library is not installed and the check has to be skipped.
+    """
+    size = os.path.getsize(path)
+
+    if size > 10 * 1024 * 1024:
+        raise RuntimeError("قەبارەی فۆنت زۆر گەورەیە (سنوور: 10MB).")
+
+    try:
+        ImageFont.truetype(path, 40)
+    except Exception:
+        raise RuntimeError(
+            "ئەم فایلە فۆنتی دروست نییە. تکایە فایلی TTF یان OTF بنێرە."
+        )
+
+    try:
+        from fontTools.ttLib import TTFont
+    except ImportError:
+        return None  # library missing -> accept the font without glyph check
+
+    try:
+        font = TTFont(path, fontNumber=0, lazy=True)
+        cmap = font.getBestCmap() or {}
+        font.close()
+    except Exception:
+        return None
+
+    if require_kurdish:
+        # Kurdish-specific letters: the tafsir text cannot be rendered without them.
+        required = "ڕڵۆێپچژگڤ"
+    else:
+        # Basic Arabic letters for the ayah font.
+        required = "ابتثجحخدذرزسشصضطظعغفقكلمنهوي"
+
+    return [char for char in required if ord(char) not in cmap]
 
 
 SETTING_LABELS = {
@@ -1508,8 +1623,8 @@ SETTING_LABELS = {
     "footer_size": "قەبارەی دەقی خوارەوە",
     "ayah_y": "شوێنی ئایەت",
     "tafsir_y": "شوێنی تەفسیر",
-    "ayah_font": "فۆنتی ئایەت",
-    "tafsir_font": "فۆنتی تەفسیر",
+    "ayah_font": "فۆنتی",
+    "tafsir_font": "شێوەی",
 }
 
 
@@ -1521,7 +1636,7 @@ PREVIEW_DIR = os.path.join(JOBS_DIR, "previews")
 
 SAMPLE_AYAH = {
     "surah_number": 94,
-    "surah_name": "الشرح",
+    "surah_name": "سورەتی الشرح",
     "ayah_number": 6,
     "arabic": "إِنَّ مَعَ الْعُسْرِ يُسْرًا",
     "tafsir": "بێگومان لەگەڵ هەموو سەختییەکەوە ئاسانییەک هەیە. ئەمە نموونەیەکە بۆ پیشاندانی شێوازی ڕێکخستنەکانت.",
@@ -1630,7 +1745,8 @@ def send_settings_preview(chat_id, session):
 
 def keyboard_text_settings(settings=None):
     settings = settings or default_text_settings()
-    header_label = "پیشاندانی" if settings.get("show_header", True) else "شاردنەوەی"
+    info_state = "✅ نیشان دەدرێت" if settings.get("show_surah_info", True) else "❌ شاراوەتەوە"
+    info_pos = "⬆️ سەرەوە" if settings.get("surah_info_pos", "bottom") == "top" else "⬇️ خوارەوە"
     return {"inline_keyboard": [
         [{"text": "🎨 ڕەنگی ئایەت: " + color_label(settings.get("ayah_color", (255,255,255))), "callback_data": "setting:ayah_color"},
          {"text": "🟡 ڕەنگی تەفسیر: " + color_label(settings.get("tafsir_color", (255,210,90))), "callback_data": "setting:tafsir_color"}],
@@ -1640,11 +1756,12 @@ def keyboard_text_settings(settings=None):
          {"text": "🔎 قەبارەی دەقی خوارەوە", "callback_data": "setting:footer_size"}],
         [{"text": "⬆️ شوێنی ئایەت", "callback_data": "setting:ayah_y"},
          {"text": "⬇️ شوێنی تەفسیر", "callback_data": "setting:tafsir_y"}],
-        [{"text": "👁️ " + header_label + " ناوی سوورەت و ژمارەی ئایەت لە سەرەوە", "callback_data": "toggle_header"}],
-        [{"text": ("📌 شاردنەوەی" if settings.get("show_footer_info", True) else "📌 پیشاندانی") + " ناوی سوورەت و ژمارە لە خوارەوە", "callback_data": "toggle_footer_info"}],
+        # ONE switch + ONE position for the surah name (was two toggles before).
+        [{"text": "👁️ ناوی سوورەت و ژمارەی ئایەت: " + info_state, "callback_data": "toggle_surah_info"}],
+        [{"text": "📍 شوێنی ناوی سوورەت: " + info_pos, "callback_data": "toggle_surah_info_pos"}],
         [{"text": "✍️ گۆڕینی دەقی خوارەوە", "callback_data": "footer_text"}],
-        [{"text": "🔤 فۆنتی ئایەت: " + qv.font_label(settings.get("ayah_font", qv.DEFAULT_AYAH_FONT)), "callback_data": "setting:ayah_font"},
-         {"text": "🔡 فۆنتی تەفسیر: " + qv.font_label(settings.get("tafsir_font", qv.DEFAULT_TAFSIR_FONT)), "callback_data": "setting:tafsir_font"}],
+        [{"text": "🔤 فۆنتی: " + font_value_label("ayah_font", settings.get("ayah_font", qv.DEFAULT_AYAH_FONT)), "callback_data": "setting:ayah_font"},
+         {"text": "✍️ شێوەی: " + font_value_label("tafsir_font", settings.get("tafsir_font", qv.DEFAULT_TAFSIR_FONT)), "callback_data": "setting:tafsir_font"}],
         [{"text": "✅ تەواوە، بەردەوام بە", "callback_data": "settings:done"}],
     ]}
 
@@ -1932,6 +2049,101 @@ def handle_message(message):
             send_message(chat_id, "❌ نەمتوانی فایلەکە وەربگرم: " + str(exc))
         return
 
+    # Receive a font file (TTF/OTF) uploaded by the user from their phone.
+    if session.get("state") == "await_font":
+        slot = session.get("font_slot")
+        document = message.get("document")
+
+        if slot not in ("ayah_font", "tafsir_font"):
+            session["state"] = "text_settings"
+            send_message(
+                chat_id,
+                "داواکارییەکە بەسەرچووە. تکایە فۆنتەکە دووبارە هەڵبژێرە.",
+                keyboard_text_settings(session.setdefault("text_settings", saved_text_settings(chat_id))),
+            )
+            return
+
+        if not document:
+            send_message(
+                chat_id,
+                "📤 تکایە فایلی فۆنت (TTF یان OTF) وەک «فایل/Document» بنێرە،"
+                " یان /cancel بنووسە.",
+            )
+            return
+
+        file_name = str(document.get("file_name") or "")
+
+        if not file_name.lower().endswith((".ttf", ".otf")):
+            send_message(
+                chat_id,
+                "❌ تەنها فایلی فۆنتی TTF یان OTF قبوڵ دەکرێت."
+                " تکایە دووبارە بنێرەوە یان /cancel بنووسە.",
+            )
+            return
+
+        destination = None
+
+        try:
+            os.makedirs(USER_FONTS_DIR, exist_ok=True)
+
+            extension = ".otf" if file_name.lower().endswith(".otf") else ".ttf"
+            destination = os.path.join(USER_FONTS_DIR, "font_%s%s" % (chat_id, extension))
+
+            # Remove a previous copy with the other extension so the
+            # user never keeps two stale font files at once.
+            for old_extension in (".ttf", ".otf"):
+                old_path = os.path.join(USER_FONTS_DIR, "font_%s%s" % (chat_id, old_extension))
+                if old_path != destination and os.path.isfile(old_path):
+                    try:
+                        os.remove(old_path)
+                    except OSError:
+                        pass
+
+            download_telegram_file(document["file_id"], destination)
+
+            missing_letters = validate_font_file(
+                destination,
+                require_kurdish=(slot == "tafsir_font"),
+            )
+
+            if missing_letters:
+                try:
+                    os.remove(destination)
+                except OSError:
+                    pass
+                send_message(
+                    chat_id,
+                    "❌ ئەم فۆنتە ئەم پیتە پێویستانەی تێدا نییە: %s\n"
+                    "تکایە فۆنتێکی تر بنێرە یان /cancel بنووسە."
+                    % " ".join(missing_letters),
+                )
+                return
+
+            settings = session.setdefault("text_settings", saved_text_settings(chat_id))
+            settings[slot] = qv.CUSTOM_FONT_KEY
+            settings[slot + "_custom"] = destination
+            save_text_settings(chat_id, settings)
+
+            session["state"] = "text_settings"
+            session.pop("font_slot", None)
+
+            send_message(
+                chat_id,
+                "✅ فۆنتەکەت هەڵگیرا و ئێستا بەکاردەهێنرێت. پێشبینینێکت بۆ ناردم:",
+                keyboard_text_settings(settings),
+            )
+            send_settings_preview(chat_id, session)
+
+        except Exception as exc:
+            log_exception("CUSTOM FONT UPLOAD ERROR", exc)
+            if destination and os.path.isfile(destination):
+                try:
+                    os.remove(destination)
+                except OSError:
+                    pass
+            send_message(chat_id, "❌ نەمتوانی فۆنتەکە وەربگرم: " + str(exc))
+        return
+
     if message.get("photo") or message.get("video"):
         send_message(chat_id, "بۆ بەکارهێنانی گەلەری، سەرەتا /start بنووسە و قۆناغەکان تەواو بکە.")
         return
@@ -2151,9 +2363,12 @@ def handle_callback(callback):
                 raise ValueError("تکایە /start دووبارە بکە.")
             answer_callback(callback_id)
             label = SETTING_LABELS.get(setting, setting)
-            if setting in ("ayah_font", "tafsir_font"):
+            if setting == "ayah_font":
                 current = (session.get("text_settings") or {}).get(setting)
-                send_message(chat_id, "🔤 فۆنتی دڵخوازی خۆت بۆ %s هەڵبژێرە:" % label, keyboard_fonts(setting, current))
+                send_message(chat_id, "🔤 فۆنتی هەڵبژێرە (فۆنتی قورئان):", keyboard_fonts(setting, current))
+            elif setting == "tafsir_font":
+                current = (session.get("text_settings") or {}).get(setting)
+                send_message(chat_id, "✍️ شێوەی نووسین هەڵبژێرە (فۆنتی تەفسیر):", keyboard_fonts(setting, current))
             else:
                 send_message(chat_id, "هەڵبژاردەی خۆت بۆ %s دیاری بکە:" % label, keyboard_setting_values(setting))
             return
@@ -2169,7 +2384,19 @@ def handle_callback(callback):
             if not session or session.get("state") != "text_settings" or setting not in allowed:
                 raise ValueError("ڕێکخستنەکە دروست نییە.")
             if setting in ("ayah_font", "tafsir_font"):
-                if raw not in qv.FONT_FILES:
+                if raw == qv.CUSTOM_FONT_KEY:
+                    # User wants to upload their own font file from their phone.
+                    session["state"] = "await_font"
+                    session["font_slot"] = setting
+                    answer_callback(callback_id, "فۆنت بنێرە")
+                    send_message(
+                        chat_id,
+                        "📤 تکایە فایلی فۆنتەکەت (TTF یان OTF) بنێرە بۆ بۆتەکە.\n\n"
+                        "لە تێلەگرام: 📎 دوگمە بنگرە > «File» > فۆنتەکە هەڵبژێرە.\n"
+                        "بۆ هەڵوەشاندنەوە /cancel بنووسە.",
+                    )
+                    return
+                if qv.normalize_font_key(raw) != raw:
                     raise ValueError("فۆنتەکە دروست نییە.")
                 value = raw
             elif setting.endswith("color"):
@@ -2184,28 +2411,28 @@ def handle_callback(callback):
             send_settings_preview(chat_id, session)
             return
 
-        if data == "toggle_header":
+        if data == "toggle_surah_info":
+            # ONE switch: show or hide the surah name + ayah number.
             session = SESSIONS.get(chat_id)
             if not session or session.get("state") != "text_settings":
                 raise ValueError("تکایە /start دووبارە بکە.")
             settings = session.setdefault("text_settings", default_text_settings())
-            settings["show_header"] = not settings.get("show_header", False)
-            if settings["show_header"]:
-                settings["show_footer_info"] = False
+            settings["show_surah_info"] = not settings.get("show_surah_info", True)
             save_text_settings(chat_id, settings)
             answer_callback(callback_id, "ڕێکخستن پاشەکەوت کرا")
             send_message(chat_id, "🎨 ڕێکخستنی دەق:", keyboard_text_settings(settings))
             send_settings_preview(chat_id, session)
             return
 
-        if data == "toggle_footer_info":
+        if data == "toggle_surah_info_pos":
+            # Position of the surah name: top or bottom.
             session = SESSIONS.get(chat_id)
             if not session or session.get("state") != "text_settings":
                 raise ValueError("تکایە /start دووبارە بکە.")
             settings = session.setdefault("text_settings", default_text_settings())
-            settings["show_footer_info"] = not settings.get("show_footer_info", True)
-            if settings["show_footer_info"]:
-                settings["show_header"] = False
+            settings["surah_info_pos"] = (
+                "bottom" if settings.get("surah_info_pos", "bottom") == "top" else "top"
+            )
             save_text_settings(chat_id, settings)
             answer_callback(callback_id, "ڕێکخستن پاشەکەوت کرا")
             send_message(chat_id, "🎨 ڕێکخستنی دەق:", keyboard_text_settings(settings))
@@ -2224,6 +2451,10 @@ def handle_callback(callback):
         if data == "settings:back":
             answer_callback(callback_id)
             session = SESSIONS.get(chat_id)
+            # Leaving the "upload your font" step returns to the settings menu.
+            if session and session.get("state") == "await_font":
+                session["state"] = "text_settings"
+                session.pop("font_slot", None)
             send_message(chat_id, "🎨 ڕێکخستنی دەق:", keyboard_text_settings((session or {}).get("text_settings", saved_text_settings(chat_id))))
             return
 
@@ -2464,12 +2695,14 @@ def main():
             "ffprobe لەگەڵ FFmpeg پێویستە."
         )
 
-    if not os.path.exists(
-        os.path.join(BASE_DIR, "quran.ttf")
-    ):
-        log_error(
-            "WARNING: quran.ttf was not found in the bot directory."
-        )
+    for font_info in qv.FONT_FILES.values():
+        font_path = os.path.join(BASE_DIR, font_info["file"])
+        if not os.path.exists(font_path):
+            log_error(
+                "WARNING: font file was not found: "
+                + font_path
+                + " (the bot will try to download it from GitHub)"
+            )
 
     log_error(
         "Bot running; each video is sent only "
