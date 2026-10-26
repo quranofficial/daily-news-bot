@@ -6,6 +6,7 @@ import sys
 import json
 import time
 import queue
+import random
 import hashlib
 import shutil
 import sqlite3
@@ -109,6 +110,8 @@ def default_text_settings():
         "tafsir_font": qv.DEFAULT_TAFSIR_FONT,
         # Language of the ayah number: "en" (123) or "ku" (١٢٣).
         "number_lang": "en",
+        # Show/hide the footer text line (toggle button in the settings menu).
+        "show_footer": True,
         # Background darkening percentage 0..100 (set from the settings menu).
         "background_darkness": 0,
     }
@@ -528,7 +531,7 @@ def send_photo(chat_id, path, caption):
 def send_background_previews(chat_id, kind):
     """Send previews only on first visit, unless the user explicitly asks again."""
     ext = "png" if kind == "image" else "mp4"
-    for number in range(1, 6):
+    for number in range(1, 11):
         local_path = os.path.join(BACKGROUND_DIR, "%d.%s" % (number, ext))
         if not os.path.isfile(local_path):
             try:
@@ -539,9 +542,9 @@ def send_background_previews(chat_id, kind):
                 continue
         try:
             if kind == "image":
-                send_photo(chat_id, local_path, "🖼️ وێنەی پاشبنەما %d/5" % number)
+                send_photo(chat_id, local_path, "🖼️ وێنەی پاشبنەما %d/10" % number)
             else:
-                send_video(chat_id, local_path, "🎬 ڤیدیۆی پاشبنەما %d/5" % number)
+                send_video(chat_id, local_path, "🎬 ڤیدیۆی پاشبنەما %d/10" % number)
         except Exception as exc:
             log_exception("BACKGROUND PREVIEW SEND FAILED", exc)
             send_message(chat_id, "نەتوانرا پێشبینینی فایل %d بنێردرێت." % number)
@@ -1486,13 +1489,92 @@ def keyboard_output_modes():
 
 def keyboard_backgrounds(kind):
     rows = []
-    for number in range(1, 6):
+    for number in range(1, 11):
         ext = "png" if kind == "image" else "mp4"
         rows.append([{"text": "%s %d" % ("🖼️" if kind == "image" else "🎬", number),
                       "callback_data": "background:%s:%d" % (kind, number)}])
     rows.append([{"text": "📱 هەڵبژاردن لە گەلەری مۆبایل", "callback_data": "gallery:%s" % kind}])
-    rows.append([{"text": "👁️ دووبارە پیشاندانی ٥ پاشبنەما", "callback_data": "previews:%s" % kind}])
+    rows.append([{"text": "👁️ دووبارە پیشاندانی ١٠ پاشبنەما", "callback_data": "previews:%s" % kind}])
     return {"inline_keyboard": rows}
+
+
+# =========================
+# RANDOM DESIGN (🎲 one-tap beautiful random theme)
+# =========================
+
+# Curated color themes: every theme pairs a soft near-white ayah color with
+# a matching accent, so any random pick still looks professional.
+RANDOM_THEMES = [
+    {"name": "زەرداوی شاهانە", "ayah": (255, 255, 255), "tafsir": (255, 210, 90), "other": (255, 224, 150)},
+    {"name": "سەوزی ئاسمانی", "ayah": (240, 255, 245), "tafsir": (130, 255, 170), "other": (190, 255, 215)},
+    {"name": "شینی ئاسمان", "ayah": (245, 250, 255), "tafsir": (130, 200, 255), "other": (200, 225, 255)},
+    {"name": "پەمەیی گوڵ", "ayah": (255, 245, 250), "tafsir": (255, 145, 190), "other": (255, 205, 225)},
+    {"name": "مۆری شەو", "ayah": (250, 245, 255), "tafsir": (205, 160, 255), "other": (230, 205, 255)},
+    {"name": "پرتەقاڵی ئاوارە", "ayah": (255, 250, 240), "tafsir": (255, 165, 80), "other": (255, 215, 170)},
+    {"name": "فیرووزەیی", "ayah": (240, 255, 254), "tafsir": (100, 240, 230), "other": (185, 245, 240)},
+    {"name": "زەیتوونی", "ayah": (250, 252, 240), "tafsir": (190, 220, 120), "other": (220, 235, 175)},
+    {"name": "ئاڵتوونی", "ayah": (255, 235, 190), "tafsir": (255, 205, 110), "other": (255, 220, 160)},
+    {"name": "سپیی پاک", "ayah": (255, 255, 255), "tafsir": (235, 235, 235), "other": (255, 255, 255)},
+]
+
+# Number of backgrounds available in the repository (1.png..10.png / 1.mp4..10.mp4).
+BACKGROUND_COUNT = 10
+
+
+def resolve_background(kind, number):
+    """Local path of background number, downloading from GitHub if needed."""
+    if kind not in ("image", "video") or number not in range(1, BACKGROUND_COUNT + 1):
+        raise ValueError("پاشبنەماکە دروست نییە.")
+    ext = "png" if kind == "image" else "mp4"
+    local_path = os.path.join(BACKGROUND_DIR, "%d.%s" % (number, ext))
+    if not os.path.isfile(local_path):
+        url = BACKGROUND_BASE_URL + "%d.%s" % (number, ext)
+        try:
+            download_file(url, local_path, min_size=1000)
+        except Exception as exc:
+            raise RuntimeError(
+                "فایلی %d.%s لە GitHub نەدۆزرایەوە. دڵنیابە فایلەکە لە ڕەگی repository ـەکەت بارکراوە. %s"
+                % (number, ext, exc)
+            )
+    return local_path
+
+
+def apply_random_design(chat_id, session):
+    """Randomize colors, sizes, positions, fonts and the background.
+
+    Every call produces a fresh combination; the curated themes keep the
+    result beautiful no matter which one is picked.
+    """
+    theme = random.choice(RANDOM_THEMES)
+    settings = session.setdefault("text_settings", default_text_settings())
+
+    settings["ayah_color"] = theme["ayah"]
+    settings["tafsir_color"] = theme["tafsir"]
+    settings["other_color"] = theme["other"]
+    settings["ayah_size"] = random.randint(38, 52)
+    settings["tafsir_size"] = random.randint(24, 32)
+    settings["other_size"] = random.randint(20, 27)
+    settings["footer_size"] = random.randint(28, 38)
+    settings["ayah_y"] = random.choice([190, 220, 250, 280, 310])
+    settings["tafsir_y"] = random.choice([640, 670, 700, 730])
+    settings["ayah_font"] = random.choice(["quran1", "quran2", "quran3"])
+    settings["tafsir_font"] = random.choice(["rabar1", "rabar2", "rabar3"])
+    settings["background_darkness"] = random.randint(15, 45)
+
+    # Pick a random background (image or video, 1..10) for the user,
+    # so they do not have to choose anything at all.
+    bg_note = ""
+    kind = random.choice(["image", "video"])
+    number = random.randint(1, BACKGROUND_COUNT)
+    try:
+        session["background_path"] = resolve_background(kind, number)
+        session["background_kind"] = kind
+        bg_note = " • پاشبنەما: %s %d" % ("🖼️ وێنە" if kind == "image" else "🎬 ڤیدیۆ", number)
+    except Exception as exc:
+        log_error("RANDOM BACKGROUND FAILED | %r" % exc)
+        bg_note = " • پاشبنەمای پێشوو هەڵگیرا"
+
+    return theme["name"], bg_note
 
 
 def keyboard_tafsir():
@@ -1766,6 +1848,7 @@ def keyboard_text_settings(settings=None):
     settings = settings or default_text_settings()
     info_state = "✅ نیشان دەدرێت" if settings.get("show_surah_info", True) else "❌ شاراوەتەوە"
     info_pos = "⬆️ سەرەوە" if settings.get("surah_info_pos", "bottom") == "top" else "⬇️ خوارەوە"
+    footer_state = "✅ نیشان دەدرێت" if settings.get("show_footer", True) else "❌ شاراوەتەوە"
     number_lang = settings.get("number_lang", "en")
     number_label = "کوردی (١٢٣)" if number_lang == "ku" else "English (123)"
     try:
@@ -1773,6 +1856,9 @@ def keyboard_text_settings(settings=None):
     except (TypeError, ValueError):
         darkness = 0
     return {"inline_keyboard": [
+        # One tap -> a brand-new random beautiful design (colors, sizes,
+        # positions, fonts and background all change together).
+        [{"text": "🎲 دیزاینی هەڕەمەکی (Random)", "callback_data": "random_design"}],
         [{"text": "🎨 ڕەنگی ئایەت: " + color_label(settings.get("ayah_color", (255,255,255))), "callback_data": "setting:ayah_color"},
          {"text": "🟡 ڕەنگی تەفسیر: " + color_label(settings.get("tafsir_color", (255,210,90))), "callback_data": "setting:tafsir_color"}],
         [{"text": "🔠 قەبارەی ئایەت", "callback_data": "setting:ayah_size"},
@@ -1784,8 +1870,10 @@ def keyboard_text_settings(settings=None):
         # ONE switch + ONE position for the surah name (was two toggles before).
         [{"text": "👁️ ناوی سوورەت و ژمارەی ئایەت: " + info_state, "callback_data": "toggle_surah_info"}],
         [{"text": "📍 شوێنی ناوی سوورەت: " + info_pos, "callback_data": "toggle_surah_info_pos"}],
-        [{"text": "🔢 ژمارەی ئایەت: " + number_label, "callback_data": "setting:number_lang"}],
+        # Footer text: user can hide it and bring it back, like the surah name.
+        [{"text": "📝 دەقی خوارەوە: " + footer_state, "callback_data": "toggle_footer"}],
         [{"text": "✍️ گۆڕینی دەقی خوارەوە", "callback_data": "footer_text"}],
+        [{"text": "🔢 ژمارەی ئایەت: " + number_label, "callback_data": "setting:number_lang"}],
         [{"text": "🌑 تاریککردنی پاشبنەما: %d%%" % darkness, "callback_data": "setting:background_darkness"}],
         [{"text": "🔤 فۆنتی: " + font_value_label("ayah_font", settings.get("ayah_font", qv.DEFAULT_AYAH_FONT)), "callback_data": "setting:ayah_font"},
          {"text": "✍️ فۆنتی: " + font_value_label("tafsir_font", settings.get("tafsir_font", qv.DEFAULT_TAFSIR_FONT)), "callback_data": "setting:tafsir_font"}],
@@ -2342,7 +2430,7 @@ def handle_callback(callback):
             if prefs.get("previews_seen_" + kind):
                 send_message(chat_id, "⬇️ ژمارەی پاشبنەما هەڵبژێرە:", keyboard_backgrounds(kind))
             else:
-                edit_message(chat_id, message_id, "⏳ پێشبینینی ٥ پاشبنەما بۆ یەکەم جار دەنێردرێن...")
+                edit_message(chat_id, message_id, "⏳ پێشبینینی ١٠ پاشبنەما بۆ یەکەم جار دەنێردرێن...")
                 send_background_previews(chat_id, kind)
             return
 
@@ -2360,20 +2448,10 @@ def handle_callback(callback):
         if data.startswith("background:"):
             _, kind, raw_number = data.split(":", 2)
             number = int(raw_number)
-            if kind not in ("image", "video") or number not in range(1, 6):
-                raise ValueError("پاشبنەماکە دروست نییە.")
             session = SESSIONS.get(chat_id)
             if not session or session.get("state") != "background_choice":
                 raise ValueError("تکایە /start دووبارە بکە.")
-            ext = "png" if kind == "image" else "mp4"
-            local_path = os.path.join(BACKGROUND_DIR, "%d.%s" % (number, ext))
-            if not os.path.isfile(local_path):
-                url = BACKGROUND_BASE_URL + "%d.%s" % (number, ext)
-                try:
-                    download_file(url, local_path, min_size=1000)
-                except Exception as exc:
-                    raise RuntimeError("فایلی %d.%s لە GitHub نەدۆزرایەوە. دڵنیابە فایلەکە لە ڕەگی repository ـەکەت بارکراوە. %s" % (number, ext, exc))
-            session["background_path"] = local_path
+            session["background_path"] = resolve_background(kind, number)
             session["background_kind"] = kind
             session["state"] = "tafsir_choice"
             answer_callback(callback_id, "پاشبنەما هەڵبژێردرا")
@@ -2490,6 +2568,38 @@ def handle_callback(callback):
             save_text_settings(chat_id, settings)
             answer_callback(callback_id, "ڕێکخستن پاشەکەوت کرا")
             send_message(chat_id, "🎨 ڕێکخستنی دەق:", keyboard_text_settings(settings))
+            send_settings_preview(chat_id, session)
+            return
+
+        if data == "toggle_footer":
+            # Show/hide the bottom footer text, like the surah-name toggle.
+            session = SESSIONS.get(chat_id)
+            if not session or session.get("state") != "text_settings":
+                raise ValueError("تکایە /start دووبارە بکە.")
+            settings = session.setdefault("text_settings", default_text_settings())
+            settings["show_footer"] = not settings.get("show_footer", True)
+            save_text_settings(chat_id, settings)
+            answer_callback(callback_id, "ڕێکخستن پاشەکەوت کرا")
+            send_message(chat_id, "🎨 ڕێکخستنی دەق:", keyboard_text_settings(settings))
+            send_settings_preview(chat_id, session)
+            return
+
+        if data == "random_design":
+            # One tap -> a completely new random design: colors, sizes,
+            # positions, fonts, darkness and even the background.
+            session = SESSIONS.get(chat_id)
+            if not session or session.get("state") != "text_settings":
+                raise ValueError("تکایە /start دووبارە بکە.")
+            answer_callback(callback_id, "🎲 دیزاینی نوێ ئامادە دەکرێت...")
+            theme_name, bg_note = apply_random_design(chat_id, session)
+            save_text_settings(chat_id, session["text_settings"])
+            session["state"] = "text_settings"
+            send_message(
+                chat_id,
+                "🎲 دیزاینی هەڕەمەکی «%s» جێبەجێ کرا!%s\n"
+                "دوگمەکە دووبارە بگەڕێ بۆ دیزاینیەکی تازە." % (theme_name, bg_note),
+                keyboard_text_settings(session["text_settings"]),
+            )
             send_settings_preview(chat_id, session)
             return
 

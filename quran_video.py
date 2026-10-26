@@ -561,13 +561,16 @@ def create_text_overlay(ayah, index, image_path, include_tafsir=True, settings=N
         draw_rtl_block(draw, ayah.get("tafsir", ""), tafsir_y, WIDTH - 90, tafsir_size, tafsir_color,
                        max_lines=50, line_gap=5, max_height=int(settings.get("tafsir_height", 430)),
                        use_quran_font=False, font_key=tafsir_font_key, custom_font_path=tafsir_custom)
-    if settings.get("show_footer", True):
+    # The footer text can now be hidden/shown by the user (toggle_footer),
+    # but the surah name + ayah number stay available in both states.
+    show_footer = bool(settings.get("show_footer", True))
+    if include_tafsir:
+        footer_y = int(settings.get("footer_y", 1145))
+    else:
+        footer_y = int(settings.get("footer_y", 1045))
+    if show_footer:
         footer_text = str(settings.get("footer_text", "قورئانی پیرۆز - ڕێگای ئیسلام"))
         footer_size = max(12, int(settings.get("footer_size", 34)))
-        if include_tafsir:
-            footer_y = int(settings.get("footer_y", 1145))
-        else:
-            footer_y = int(settings.get("footer_y", 1045))
         draw.text(
             (WIDTH // 2, footer_y),
             shape_rtl(footer_text),
@@ -577,30 +580,34 @@ def create_text_overlay(ayah, index, image_path, include_tafsir=True, settings=N
             direction="rtl",
             language="ar",
         )
-        if show_info and info_pos == "bottom":
-            info_size = max(12, int(settings.get("other_size", 24)))
-            surah_y = footer_y + 34
-            ayah_y_footer = footer_y + 62
-            # The database name already includes "سورەتی" (e.g. سورەتی الفاتحة),
-            # so no extra prefix is added here.
-            draw.text(
-                (WIDTH // 2, surah_y),
-                shape_rtl(str(ayah.get("surah_name", ""))),
-                font=make_tafsir_font(info_size, tafsir_font_key, tafsir_custom),
-                fill=other_color,
-                anchor="mm",
-                direction="rtl",
-                language="ar",
-            )
-            draw.text(
-                (WIDTH // 2, ayah_y_footer),
-                shape_rtl("ژمارەی ئایەت: " + format_number(ayah.get("ayah_number", ""), number_lang)),
-                font=make_tafsir_font(max(12, info_size - 2), tafsir_font_key, tafsir_custom),
-                fill=other_color,
-                anchor="mm",
-                direction="rtl",
-                language="ar",
-            )
+        surah_offset = 34
+    else:
+        # No footer text: move the surah info up into the freed space.
+        surah_offset = 8
+    if show_info and info_pos == "bottom":
+        info_size = max(12, int(settings.get("other_size", 24)))
+        surah_y = footer_y + surah_offset
+        ayah_y_footer = surah_y + 28
+        # The database name already includes "سورەتی" (e.g. سورەتی الفاتحة),
+        # so no extra prefix is added here.
+        draw.text(
+            (WIDTH // 2, surah_y),
+            shape_rtl(str(ayah.get("surah_name", ""))),
+            font=make_tafsir_font(info_size, tafsir_font_key, tafsir_custom),
+            fill=other_color,
+            anchor="mm",
+            direction="rtl",
+            language="ar",
+        )
+        draw.text(
+            (WIDTH // 2, ayah_y_footer),
+            shape_rtl("ژمارەی ئایەت: " + format_number(ayah.get("ayah_number", ""), number_lang)),
+            font=make_tafsir_font(max(12, info_size - 2), tafsir_font_key, tafsir_custom),
+            fill=other_color,
+            anchor="mm",
+            direction="rtl",
+            language="ar",
+        )
     image.save(image_path)
 
 
