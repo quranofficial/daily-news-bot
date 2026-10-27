@@ -12,7 +12,7 @@ import shutil
 import threading
 import urllib.request
 
-from PIL import Image, ImageDraw, ImageFont
+from PIL import Image, ImageDraw, ImageFilter, ImageFont
 
 
 # =========================
@@ -389,16 +389,18 @@ def get_text_height(draw, lines, font, line_gap):
 
 
 # =========================
-# AUTO-FIT RTL TEXT
+# AUTO-FIT RTL TEXT (plan + paint)
+#
+# The text is first "planned" (font size, wrapped lines, positions) and
+# then painted. This makes it possible to paint every layer TWICE:
+# once as a soft black silhouette (the shadow) and once in the real
+# color, so the shadow sits cleanly UNDER the text.
 # =========================
 
-def draw_rtl_block(
-    draw,
+def plan_rtl_block(
     text,
-    top,
     max_width,
     font_size,
-    fill,
     max_lines=40,
     line_gap=5,
     max_height=None,
@@ -406,10 +408,11 @@ def draw_rtl_block(
     font_key=None,
     custom_font_path=None
 ):
+    """Fit RTL text into the frame; returns a painting plan (or None if empty)."""
     text = str(text).strip()
 
     if not text:
-        return top
+        return None
 
     # Ayah text uses the user-selected ayah font.
     # Tafsir uses the user-selected tafsir font.
@@ -425,6 +428,8 @@ def draw_rtl_block(
     selected_heights = None
     selected_gap = line_gap
 
+    dummy_draw = ImageDraw.Draw(Image.new("RGB", (8, 8)))
+
     for size in range(font_size, 7, -1):
         font = font_loader(size)
 
@@ -436,7 +441,7 @@ def draw_rtl_block(
         current_gap = min(line_gap, max(1, size // 8))
 
         total_height, heights = get_text_height(
-            draw,
+            dummy_draw,
             lines,
             font,
             current_gap
@@ -462,17 +467,33 @@ def draw_rtl_block(
         + max(0, len(selected_lines) - 1) * selected_gap
     )
 
-    y = top
+    y_offset = 0
 
     if max_height is not None:
-        y += max(0, (max_height - total_height) // 2)
+        y_offset += max(0, (max_height - total_height) // 2)
 
-    for line, line_height in zip(selected_lines, selected_heights):
+    return {
+        "font": selected_font,
+        "lines": selected_lines,
+        "heights": selected_heights,
+        "gap": selected_gap,
+        "y_offset": y_offset,
+    }
+
+
+def paint_rtl_block(draw, plan, fill, top, x_shift=0, y_shift=0):
+    """Paint a planned text block, vertically centered in its band."""
+    if not plan:
+        return
+
+    y = top + plan["y_offset"] + y_shift
+
+    for line, line_height in zip(plan["lines"], plan["heights"]):
         try:
             draw.text(
-                (WIDTH // 2, y),
+                (WIDTH // 2 + x_shift, y),
                 shape_rtl(line),
-                font=selected_font,
+                font=plan["font"],
                 fill=fill,
                 anchor="mt",
                 direction="rtl",
@@ -480,26 +501,90 @@ def draw_rtl_block(
             )
         except (TypeError, ValueError):
             draw.text(
-                (WIDTH // 2, y),
+                (WIDTH // 2 + x_shift, y),
                 shape_rtl(line),
-                font=selected_font,
+                font=plan["font"],
                 fill=fill,
                 anchor="mt"
             )
 
-        y += line_height + selected_gap
-
-    return y
+        y += line_height + plan["gap"]
 
 
 # =========================
-# TRANSPARENT TEXT OVERLAY (NO PANELS/BOXES)
+# SOFT TEXT SHADOW
 # =========================
-def create_text_overlay(ayah, index, image_path, include_tafsir=True, settings=None):
-    """Transparent overlay: only text, no boxes, cards, panels, or background."""
+
+# A gentle blurred shadow under every text element keeps the text
+# readable and elegant on any background (bright or dark).
+SHADOW_COLOR = (0, 0, 0, 110)
+SHADOW_OFFSET = (2, 3)
+SHADOW_BLUR = 2.4
+
+
+def _safe_text(draw, xy, text, font, fill, anchor="mm"):
+    try:
+        draw.text(
+            xy, text,
+            font=font,
+            fill=fill,
+            anchor=anchor,
+            direction="rtl",
+            language="ar"
+        )
+    except (TypeError, ValueError):
+        draw.text(xy, text, font=font, fill=fill, anchor=anchor)
+
+
+def _paint_ops(ops, draw, shadow_pass):
+    """Paint prepared text elements; in shadow_pass paint the silhouette."""
+    for op in ops:
+        fill = SHADOW_COLOR if shadow_pass else op["fill"]
+
+        if op["kind"] == "text":
+            xy = op["xy"]
+
+            if shadow_pass:
+                xy = (xy[0] + SHADOW_OFFSET[0], xy[1] + SHADOW_OFFSET[1])
+
+            _safe_text(draw, xy, op["text"], op["font"], fill, op.get("anchor", "mm"))
+
+        else:
+            if not op.get("plan"):
+                continue
+
+            if shadow_pass:
+                paint_rtl_block(
+                    draw, op["plan"], fill, op["top"],
+                    SHADOW_OFFSET[0], SHADOW_OFFSET[1]
+                )
+            else:
+                paint_rtl_block(draw, op["plan"], fill, op["top"])
+
+
+# =========================
+# TWO TRANSPARENT TEXT LAYERS (ayah layer + tafsir layer)
+#
+# The ayah and the tafsir live on separate transparent PNGs, so the
+# video renderer can animate them independently (staggered entrance).
+# =========================
+def render_overlay_parts(ayah, include_tafsir=True, settings=None):
+    """Render the text as two RGBA layers; returns (ayah_img, tafsir_img|None).
+
+    ayah layer:   top surah info + basmala + ayah text
+                  (plus footer / bottom info when tafsir is hidden)
+    tafsir layer: tafsir text + footer + bottom surah info
+    """
     settings = settings or {}
-    image = Image.new("RGBA", (WIDTH, HEIGHT), (0, 0, 0, 0))
-    draw = ImageDraw.Draw(image)
+    ayah_img = Image.new("RGBA", (WIDTH, HEIGHT), (0, 0, 0, 0))
+    tafsir_img = Image.new("RGBA", (WIDTH, HEIGHT), (0, 0, 0, 0))
+    ayah_shadow = Image.new("RGBA", (WIDTH, HEIGHT), (0, 0, 0, 0))
+    tafsir_shadow = Image.new("RGBA", (WIDTH, HEIGHT), (0, 0, 0, 0))
+    ayah_draw = ImageDraw.Draw(ayah_img)
+    tafsir_draw = ImageDraw.Draw(tafsir_img)
+    ayah_shadow_draw = ImageDraw.Draw(ayah_shadow)
+    tafsir_shadow_draw = ImageDraw.Draw(tafsir_shadow)
+
     ayah_color = tuple(settings.get("ayah_color", (255, 255, 255)))
     tafsir_color = tuple(settings.get("tafsir_color", (255, 210, 90)))
     other_color = tuple(settings.get("other_color", (255, 255, 255)))
@@ -509,6 +594,7 @@ def create_text_overlay(ayah, index, image_path, include_tafsir=True, settings=N
     ayah_y = int(settings.get("ayah_y", 250))
     tafsir_y = int(settings.get("tafsir_y", 690))
     other_y = int(settings.get("other_y", 115))
+    footer_size = max(12, int(settings.get("footer_size", 34)))
     ayah_font_key_raw = str(settings.get("ayah_font") or DEFAULT_AYAH_FONT)
     tafsir_font_key_raw = str(settings.get("tafsir_font") or DEFAULT_TAFSIR_FONT)
     ayah_custom = settings.get("ayah_font_custom") if ayah_font_key_raw == CUSTOM_FONT_KEY else None
@@ -528,39 +614,69 @@ def create_text_overlay(ayah, index, image_path, include_tafsir=True, settings=N
     if info_pos not in ("top", "bottom"):
         info_pos = "bottom"
 
+    ops_ayah = []
+    ops_tafsir = []
+
     if show_info and info_pos == "top":
-        draw.text((WIDTH // 2, other_y), shape_rtl(str(ayah.get("surah_name", ""))),
-                  font=make_tafsir_font(other_size, tafsir_font_key, tafsir_custom), fill=other_color, anchor="mm", direction="rtl", language="ar")
+        ops_ayah.append({
+            "kind": "text",
+            "xy": (WIDTH // 2, other_y),
+            "text": shape_rtl(str(ayah.get("surah_name", ""))),
+            "font": make_tafsir_font(other_size, tafsir_font_key, tafsir_custom),
+            "fill": other_color,
+            "anchor": "mm",
+        })
         if settings.get("show_ayah_number", True):
-            draw.text((WIDTH // 2, other_y + other_size + 12), shape_rtl("ئایەتی " + format_number(ayah.get("ayah_number", ""), number_lang)),
-                      font=make_tafsir_font(max(12, other_size - 3), tafsir_font_key, tafsir_custom), fill=other_color, anchor="mm", direction="rtl", language="ar")
+            ops_ayah.append({
+                "kind": "text",
+                "xy": (WIDTH // 2, other_y + other_size + 12),
+                "text": shape_rtl("ئایەتی " + format_number(ayah.get("ayah_number", ""), number_lang)),
+                "font": make_tafsir_font(max(12, other_size - 3), tafsir_font_key, tafsir_custom),
+                "fill": other_color,
+                "anchor": "mm",
+            })
+
     surah_number = int(ayah.get("surah_number", 0) or 0)
     ayah_number = int(ayah.get("ayah_number", 0) or 0)
     show_basmala = ayah_number == 1 and surah_number not in (1, 9)
     verse_top = ayah_y
     verse_height = int(settings.get("ayah_height", 340))
+
     if show_basmala:
-        basmala = "بِسْمِ اللَّهِ الرَّحْمَٰنِ الرَّحِيمِ"
-        draw.text(
-            (WIDTH // 2, ayah_y),
-            shape_rtl(basmala),
-            font=make_ayah_font(ayah_size, ayah_font_key, ayah_custom),
-            fill=ayah_color,
-            anchor="mm",
-            direction="rtl",
-            language="ar",
-        )
+        ops_ayah.append({
+            "kind": "text",
+            "xy": (WIDTH // 2, ayah_y),
+            "text": shape_rtl("بِسْمِ اللَّهِ الرَّحْمَٰنِ الرَّحِيمِ"),
+            "font": make_ayah_font(ayah_size, ayah_font_key, ayah_custom),
+            "fill": ayah_color,
+            "anchor": "mm",
+        })
         verse_top = ayah_y + max(48, ayah_size + 10)
         verse_height = max(100, verse_height - max(48, ayah_size + 10))
-    draw_rtl_block(
-        draw, ayah.get("arabic", ""), verse_top, WIDTH - 80, ayah_size, ayah_color,
-        max_lines=35, line_gap=8, max_height=verse_height, use_quran_font=True,
-        font_key=ayah_font_key, custom_font_path=ayah_custom
-    )
+
+    ops_ayah.append({
+        "kind": "block",
+        "top": verse_top,
+        "plan": plan_rtl_block(
+            ayah.get("arabic", ""), WIDTH - 80, ayah_size,
+            max_lines=35, line_gap=8, max_height=verse_height,
+            use_quran_font=True, font_key=ayah_font_key, custom_font_path=ayah_custom,
+        ),
+        "fill": ayah_color,
+    })
+
     if include_tafsir:
-        draw_rtl_block(draw, ayah.get("tafsir", ""), tafsir_y, WIDTH - 90, tafsir_size, tafsir_color,
-                       max_lines=50, line_gap=5, max_height=int(settings.get("tafsir_height", 430)),
-                       use_quran_font=False, font_key=tafsir_font_key, custom_font_path=tafsir_custom)
+        ops_tafsir.append({
+            "kind": "block",
+            "top": tafsir_y,
+            "plan": plan_rtl_block(
+                ayah.get("tafsir", ""), WIDTH - 90, tafsir_size,
+                max_lines=50, line_gap=5, max_height=int(settings.get("tafsir_height", 430)),
+                use_quran_font=False, font_key=tafsir_font_key, custom_font_path=tafsir_custom,
+            ),
+            "fill": tafsir_color,
+        })
+
     # The footer text can now be hidden/shown by the user (toggle_footer),
     # but the surah name + ayah number stay available in both states.
     show_footer = bool(settings.get("show_footer", True))
@@ -568,47 +684,82 @@ def create_text_overlay(ayah, index, image_path, include_tafsir=True, settings=N
         footer_y = int(settings.get("footer_y", 1145))
     else:
         footer_y = int(settings.get("footer_y", 1045))
+
+    # When tafsir is hidden the footer + bottom info join the ayah layer,
+    # so the whole video still animates as one beautiful unit.
+    label_ops = ops_tafsir if include_tafsir else ops_ayah
+
     if show_footer:
-        footer_text = str(settings.get("footer_text", "قورئانی پیرۆز - ڕێگای ئیسلام"))
-        footer_size = max(12, int(settings.get("footer_size", 34)))
-        draw.text(
-            (WIDTH // 2, footer_y),
-            shape_rtl(footer_text),
-            font=make_tafsir_font(footer_size, tafsir_font_key, tafsir_custom),
-            fill=other_color,
-            anchor="mm",
-            direction="rtl",
-            language="ar",
-        )
+        label_ops.append({
+            "kind": "text",
+            "xy": (WIDTH // 2, footer_y),
+            "text": shape_rtl(str(settings.get("footer_text", "قورئانی پیرۆز - ڕێگای ئیسلام"))),
+            "font": make_tafsir_font(footer_size, tafsir_font_key, tafsir_custom),
+            "fill": other_color,
+            "anchor": "mm",
+        })
         surah_offset = 34
     else:
         # No footer text: move the surah info up into the freed space.
         surah_offset = 8
+
     if show_info and info_pos == "bottom":
         info_size = max(12, int(settings.get("other_size", 24)))
         surah_y = footer_y + surah_offset
         ayah_y_footer = surah_y + 28
         # The database name already includes "سورەتی" (e.g. سورەتی الفاتحة),
         # so no extra prefix is added here.
-        draw.text(
-            (WIDTH // 2, surah_y),
-            shape_rtl(str(ayah.get("surah_name", ""))),
-            font=make_tafsir_font(info_size, tafsir_font_key, tafsir_custom),
-            fill=other_color,
-            anchor="mm",
-            direction="rtl",
-            language="ar",
-        )
-        draw.text(
-            (WIDTH // 2, ayah_y_footer),
-            shape_rtl("ژمارەی ئایەت: " + format_number(ayah.get("ayah_number", ""), number_lang)),
-            font=make_tafsir_font(max(12, info_size - 2), tafsir_font_key, tafsir_custom),
-            fill=other_color,
-            anchor="mm",
-            direction="rtl",
-            language="ar",
-        )
-    image.save(image_path)
+        label_ops.append({
+            "kind": "text",
+            "xy": (WIDTH // 2, surah_y),
+            "text": shape_rtl(str(ayah.get("surah_name", ""))),
+            "font": make_tafsir_font(info_size, tafsir_font_key, tafsir_custom),
+            "fill": other_color,
+            "anchor": "mm",
+        })
+        label_ops.append({
+            "kind": "text",
+            "xy": (WIDTH // 2, ayah_y_footer),
+            "text": shape_rtl("ژمارەی ئایەت: " + format_number(ayah.get("ayah_number", ""), number_lang)),
+            "font": make_tafsir_font(max(12, info_size - 2), tafsir_font_key, tafsir_custom),
+            "fill": other_color,
+            "anchor": "mm",
+        })
+
+    # 1) paint the soft shadow silhouettes, blur them and composite them
+    #    UNDER the text, then 2) paint the real text on top.
+    _paint_ops(ops_ayah, ayah_shadow_draw, shadow_pass=True)
+    ayah_img.alpha_composite(ayah_shadow.filter(ImageFilter.GaussianBlur(SHADOW_BLUR)))
+    _paint_ops(ops_ayah, ayah_draw, shadow_pass=False)
+
+    if include_tafsir:
+        _paint_ops(ops_tafsir, tafsir_shadow_draw, shadow_pass=True)
+        tafsir_img.alpha_composite(tafsir_shadow.filter(ImageFilter.GaussianBlur(SHADOW_BLUR)))
+        _paint_ops(ops_tafsir, tafsir_draw, shadow_pass=False)
+
+    return ayah_img, (tafsir_img if include_tafsir else None)
+
+
+def create_overlay_parts(ayah, ayah_path, tafsir_path, include_tafsir=True, settings=None):
+    """Save the two transparent text layers as PNG files for the video renderer."""
+    ayah_img, tafsir_img = render_overlay_parts(ayah, include_tafsir, settings)
+    ayah_img.save(ayah_path)
+
+    if tafsir_path:
+        if tafsir_img is None:
+            Image.new("RGBA", (WIDTH, HEIGHT), (0, 0, 0, 0)).save(tafsir_path)
+        else:
+            tafsir_img.save(tafsir_path)
+
+
+def create_text_overlay(ayah, index, image_path, include_tafsir=True, settings=None):
+    """Single combined transparent overlay (used for the live preview)."""
+    ayah_img, tafsir_img = render_overlay_parts(ayah, include_tafsir, settings)
+
+    if tafsir_img is not None:
+        ayah_img.alpha_composite(tafsir_img)
+
+    ayah_img.save(image_path)
 
 
 # =========================

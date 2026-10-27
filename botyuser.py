@@ -56,6 +56,26 @@ _SURAH_CACHE = None
 
 
 # =========================
+# TEXT ANIMATIONS (3 entrance styles for the ayah + tafsir text)
+# =========================
+
+# fade : soft alpha fade-in (ayah first, tafsir follows shortly after)
+# rise : text gently rises up from below while fading in
+# zoom : the ayah settles down from a slight zoom while fading in
+TEXT_ANIMS = ("fade", "rise", "zoom")
+
+TEXT_ANIM_LABELS = {
+    "fade": "فەیدی نەرم ✨",
+    "rise": "سەرکەوتن ⬆️",
+    "zoom": "زووم 🔍",
+}
+
+
+def text_anim_label(key):
+    return TEXT_ANIM_LABELS.get(str(key), TEXT_ANIM_LABELS["fade"])
+
+
+# =========================
 # CONCURRENCY (multiple users at the same time)
 # =========================
 
@@ -101,6 +121,8 @@ def default_text_settings():
         "ayah_y": 250,
         "tafsir_y": 690,
         "other_y": 115,
+        # Entrance animation of the ayah + tafsir text (see TEXT_ANIMS).
+        "text_anim": "fade",
         # ONE switch for the surah name + ONE position choice (top/bottom).
         "show_surah_info": True,
         "surah_info_pos": "bottom",
@@ -157,9 +179,13 @@ def saved_text_settings(chat_id):
         settings[slot] = key if key and key != qv.CUSTOM_FONT_KEY else fallback
         settings.pop(slot + "_custom", None)
 
-    # --- Validate the ayah-number language and the background darkness ---
+    # --- Validate the ayah-number language, animation and background darkness ---
     number_lang = str(settings.get("number_lang", "en") or "en").lower()
     settings["number_lang"] = number_lang if number_lang in qv.NUMBER_LANGS else "en"
+
+    # Text animation: fade / rise / zoom (3 types).
+    anim = str(settings.get("text_anim", "fade") or "fade").lower()
+    settings["text_anim"] = anim if anim in TEXT_ANIMS else "fade"
 
     try:
         darkness = max(0, min(100, int(settings.get("background_darkness", 0) or 0)))
@@ -1223,6 +1249,70 @@ def run_ffmpeg(args):
         )
 
 
+def _segment_filter_graph(anim, include_tafsir, bg_chain, duration):
+    """Build the -filter_complex string for one ayah segment.
+
+    Three entrance animations for the text (ayat first, tafsir follows
+    slightly later so the entrance feels staggered and alive):
+      fade - soft alpha fade-in for both layers
+      rise - both layers gently rise up while fading in
+      zoom - the ayah settles from a slight zoom while fading in
+    """
+    zoom_frames = int(duration * 24) + 30  # zoompan output frames (+1s buffer)
+    parts = [bg_chain]
+
+    if anim == "rise":
+        parts.append(
+            "[1:v]scale=720:1280,format=rgba,"
+            "fade=t=in:st=0:d=0.80:alpha=1[ovA];"
+        )
+        ayah_merge = (
+            "[bg][ovA]overlay=x=0:y='pow(1-min(t/0.8,1),3)*80':eval=frame"
+        )
+        tafsir_chain = (
+            "[2:v]scale=720:1280,format=rgba,"
+            "fade=t=in:st=0.45:d=0.70:alpha=1[ovB];"
+        )
+        tafsir_merge = (
+            "[o1][ovB]overlay=x=0:y='pow(1-min(max(t-0.45,0)/0.75,1),3)*70'"
+            ":eval=frame"
+        )
+    elif anim == "zoom":
+        parts.append(
+            "[1:v]format=rgba,"
+            "zoompan=z='1.08-0.08*min(on/36,1)'"
+            ":x='iw/2-(iw/zoom/2)':y='ih/2-(ih/zoom/2)'"
+            ":d=%d:s=720x1280:fps=24,format=rgba,"
+            "fade=t=in:st=0:d=0.50:alpha=1[ovA];" % zoom_frames
+        )
+        ayah_merge = "[bg][ovA]overlay=x=0:y=0"
+        tafsir_chain = (
+            "[2:v]scale=720:1280,format=rgba,"
+            "fade=t=in:st=0.40:d=0.85:alpha=1[ovB];"
+        )
+        tafsir_merge = "[o1][ovB]overlay=x=0:y=0"
+    else:  # fade (default)
+        parts.append(
+            "[1:v]scale=720:1280,format=rgba,"
+            "fade=t=in:st=0:d=0.85:alpha=1[ovA];"
+        )
+        ayah_merge = "[bg][ovA]overlay=x=0:y=0"
+        tafsir_chain = (
+            "[2:v]scale=720:1280,format=rgba,"
+            "fade=t=in:st=0.40:d=0.85:alpha=1[ovB];"
+        )
+        tafsir_merge = "[o1][ovB]overlay=x=0:y=0"
+
+    if include_tafsir:
+        parts.append(tafsir_chain)
+        parts.append(ayah_merge + "[o1];")
+        parts.append(tafsir_merge + ":shortest=1[v]")
+    else:
+        parts.append(ayah_merge + ":shortest=1[v]")
+
+    return "".join(parts)
+
+
 def build_video(chat_id, ayahs, reciter_id, background_path=None, background_kind="image", background_darkness=0, include_tafsir=True, text_settings=None, progress=None):
     stamp = str(int(time.time()))
 
@@ -1246,6 +1336,11 @@ def build_video(chat_id, ayahs, reciter_id, background_path=None, background_kin
             progress(int(percent), label)
         except Exception as exc:
             log_error("PROGRESS CALLBACK FAILED | %r" % exc)
+
+    # Which of the 3 text animations should play (fade / rise / zoom).
+    text_anim = str((text_settings or {}).get("text_anim", "fade") or "fade").lower()
+    if text_anim not in TEXT_ANIMS:
+        text_anim = "fade"
 
     try:
         surah_number = int(ayahs[0]["surah_number"])
@@ -1328,8 +1423,11 @@ def build_video(chat_id, ayahs, reciter_id, background_path=None, background_kin
         darkness_value = max(0, min(100, int(background_darkness)))
         brightness = -darkness_value / 100.0
 
-        # Video backgrounds are rendered ONCE as a continuous track,
+        # Image & video backgrounds are rendered ONCE as a continuous track,
         # so the background never restarts when the ayah changes.
+        # Both get a gentle colour lift (saturation + contrast) and a soft
+        # cinematic vignette; image backgrounds additionally "breathe" with
+        # a very slow Ken Burns zoom, so the frame never looks frozen.
         background_full = None
 
         if background_kind == "video":
@@ -1347,7 +1445,36 @@ def build_video(chat_id, ayahs, reciter_id, background_path=None, background_kin
                 "-t", "%.3f" % total_duration,
                 "-vf",
                 "scale=720:1280:force_original_aspect_ratio=increase,"
-                "crop=720:1280,eq=brightness=%.2f,format=yuv420p" % brightness,
+                "crop=720:1280,"
+                "eq=brightness=%.2f:saturation=1.14:contrast=1.05,"
+                "vignette=a=PI/5.5,format=yuv420p" % brightness,
+                "-r", "24",
+                "-c:v", "libx264", "-preset", "ultrafast", "-crf", "23",
+                "-an",
+                background_full,
+            ])
+
+        elif background_kind == "image":
+            if not background_path or not os.path.isfile(background_path):
+                raise RuntimeError("Background ـی هەڵبژێردراو نەدۆزرایەوە.")
+
+            report(14, "ئامادەکردنی پاشبنەمای جوان...")
+
+            background_full = os.path.join(job_dir, "background_full.mp4")
+            bg_frames = int(total_duration * 24) + 2
+
+            run_ffmpeg([
+                "ffmpeg", "-y",
+                "-i", background_path,
+                "-vf",
+                "scale=792:1408:force_original_aspect_ratio=increase,"
+                "crop=792:1408,"
+                "zoompan=z='1.05+0.05*sin(on/180)'"
+                ":x='iw/2-(iw/zoom/2)':y='ih/2-(ih/zoom/2)'"
+                ":d=%d:s=720x1280:fps=24,"
+                "eq=brightness=%.2f:saturation=1.14:contrast=1.05,"
+                "vignette=a=PI/5.5,format=yuv420p" % (bg_frames, brightness),
+                "-t", "%.3f" % total_duration,
                 "-r", "24",
                 "-c:v", "libx264", "-preset", "ultrafast", "-crf", "23",
                 "-an",
@@ -1368,9 +1495,16 @@ def build_video(chat_id, ayahs, reciter_id, background_path=None, background_kin
                 % (i, total_segments, ayah["ayah_number"]),
             )
 
-            image_path = os.path.join(
+            # The ayah and the tafsir are rendered as TWO transparent
+            # layers, so they can be animated independently.
+            ayah_png = os.path.join(
                 job_dir,
-                "image_%03d.png" % i,
+                "ayah_%03d.png" % i,
+            )
+
+            tafsir_png = os.path.join(
+                job_dir,
+                "tafsir_%03d.png" % i,
             )
 
             clip_path = os.path.join(
@@ -1378,10 +1512,10 @@ def build_video(chat_id, ayahs, reciter_id, background_path=None, background_kin
                 "clip_%03d.mp4" % i,
             )
 
-            qv.create_ayah_image(
+            qv.create_overlay_parts(
                 ayah,
-                i,
-                image_path,
+                ayah_png,
+                tafsir_png,
                 include_tafsir=include_tafsir,
                 settings=text_settings or {},
             )
@@ -1389,32 +1523,37 @@ def build_video(chat_id, ayahs, reciter_id, background_path=None, background_kin
             if background_kind == "black":
                 bg_input = ["-f", "lavfi", "-i", "color=c=black:s=720x1280:r=24"]
                 bg_chain = "[0:v]eq=brightness=%.2f[bg];" % brightness
-            elif background_kind == "video":
-                # Continue the shared background exactly where the
-                # previous ayah stopped.
+            else:
+                # Image & video backgrounds both continue the shared
+                # pre-rendered track exactly where the previous ayah
+                # stopped (no restart between ayahs).
                 bg_input = [
                     "-ss", "%.3f" % segment["bg_offset"],
                     "-i", background_full,
                 ]
                 bg_chain = "[0:v]null[bg];"
-            else:
-                if not background_path or not os.path.isfile(background_path):
-                    raise RuntimeError("Background ـی هەڵبژێردراو نەدۆزرایەوە.")
-                bg_input = ["-loop", "1", "-i", background_path]
-                bg_chain = (
-                    "[0:v]scale=720:1280:force_original_aspect_ratio=increase,"
-                    "crop=720:1280,eq=brightness=%.2f[bg];" % brightness
-                )
 
-            ffmpeg_args = ["ffmpeg", "-y"] + bg_input + [
-                "-loop", "1", "-i", image_path,
+            # Overlay inputs; the zoom animation feeds zoompan a single
+            # frame instead of a loop (zoompan generates the frames itself).
+            if text_anim == "zoom":
+                overlay_inputs = ["-i", ayah_png]
+            else:
+                overlay_inputs = ["-loop", "1", "-i", ayah_png]
+
+            if include_tafsir:
+                overlay_inputs += ["-loop", "1", "-i", tafsir_png]
+
+            # bg(1 input) + overlays + audio
+            audio_index = 1 + (2 if include_tafsir else 1)
+
+            ffmpeg_args = ["ffmpeg", "-y"] + bg_input + overlay_inputs + [
                 "-ss", "%.3f" % segment["start"],
                 "-i", full_audio_path,
                 "-filter_complex",
-                bg_chain
-                + "[1:v]scale=720:1280,format=rgba[ov];"
-                + "[bg][ov]overlay=0:0:shortest=1[v]",
-                "-map", "[v]", "-map", "2:a:0",
+                _segment_filter_graph(
+                    text_anim, include_tafsir, bg_chain, duration
+                ),
+                "-map", "[v]", "-map", "%d:a:0" % audio_index,
                 "-t", "%.3f" % duration,
                 "-c:v", "libx264", "-preset", "veryfast",
                 "-c:a", "aac", "-b:a", "128k",
@@ -1559,6 +1698,7 @@ def apply_random_design(chat_id, session):
     settings["tafsir_y"] = random.choice([640, 670, 700, 730])
     settings["ayah_font"] = random.choice(["quran1", "quran2", "quran3"])
     settings["tafsir_font"] = random.choice(["rabar1", "rabar2", "rabar3"])
+    settings["text_anim"] = random.choice(TEXT_ANIMS)
     settings["background_darkness"] = random.randint(15, 45)
 
     # Pick a random background (image or video, 1..10) for the user,
@@ -1569,7 +1709,11 @@ def apply_random_design(chat_id, session):
     try:
         session["background_path"] = resolve_background(kind, number)
         session["background_kind"] = kind
-        bg_note = " • پاشبنەما: %s %d" % ("🖼️ وێنە" if kind == "image" else "🎬 ڤیدیۆ", number)
+        bg_note = " • پاشبنەما: %s %d • ئەنیمەیشن: %s" % (
+            "🖼️ وێنە" if kind == "image" else "🎬 ڤیدیۆ",
+            number,
+            text_anim_label(settings.get("text_anim", "fade")),
+        )
     except Exception as exc:
         log_error("RANDOM BACKGROUND FAILED | %r" % exc)
         bg_note = " • پاشبنەمای پێشوو هەڵگیرا"
@@ -1722,6 +1866,7 @@ SETTING_LABELS = {
     "ayah_font": "فۆنتی",
     "tafsir_font": "فۆنتی",
     "number_lang": "ژمارەی ئایەت",
+    "text_anim": "ئەنیمەیشنی نووسین",
 }
 
 
@@ -1832,7 +1977,8 @@ def send_settings_preview(chat_id, session):
         send_photo(
             chat_id,
             preview_path,
-            "👁️ ئەمە شێوازی پێشبینیکراوەی ڕێکخستنەکانتە.",
+            "👁️ ئەمە شێوازی پێشبینیکراوەی ڕێکخستنەکانتە "
+            "(✨ ئەنیمەیشنەکە لە کاتی کارکردنی ڤیدیۆدا دەردەکەوێت).",
         )
     except Exception as exc:
         log_exception("SETTINGS PREVIEW FAILED | chat_id=%s" % chat_id, exc)
@@ -1874,6 +2020,7 @@ def keyboard_text_settings(settings=None):
         [{"text": "📝 دەقی خوارەوە: " + footer_state, "callback_data": "toggle_footer"}],
         [{"text": "✍️ گۆڕینی دەقی خوارەوە", "callback_data": "footer_text"}],
         [{"text": "🔢 ژمارەی ئایەت: " + number_label, "callback_data": "setting:number_lang"}],
+        [{"text": "✨ ئەنیمەیشنی نووسین: " + text_anim_label(settings.get("text_anim", "fade")), "callback_data": "setting:text_anim"}],
         [{"text": "🌑 تاریککردنی پاشبنەما: %d%%" % darkness, "callback_data": "setting:background_darkness"}],
         [{"text": "🔤 فۆنتی: " + font_value_label("ayah_font", settings.get("ayah_font", qv.DEFAULT_AYAH_FONT)), "callback_data": "setting:ayah_font"},
          {"text": "✍️ فۆنتی: " + font_value_label("tafsir_font", settings.get("tafsir_font", qv.DEFAULT_TAFSIR_FONT)), "callback_data": "setting:tafsir_font"}],
@@ -1900,6 +2047,11 @@ def keyboard_setting_values(setting):
         "ayah_y": [("سەرەوە", 190), ("ناوەڕاست", 300), ("خوارەوە", 420)],
         "tafsir_y": [("ناوەڕاست", 600), ("خوارەوە", 730), ("زۆر خوارەوە", 830)],
         "number_lang": [("English (123)", "en"), ("کوردی (١٢٣)", "ku")],
+        "text_anim": [
+            ("✨ فەیدی نەرم", "fade"),
+            ("⬆️ سەرکەوتن", "rise"),
+            ("🔍 زووم", "zoom"),
+        ],
     }
     rows = []
     for label, value in choices[setting]:
@@ -2496,6 +2648,16 @@ def handle_callback(callback):
                     "75 = زۆر\n100 = تەواو تاریک",
                     {"inline_keyboard": [[{"text": "↩️ گەڕانەوە بۆ ڕێکخستن", "callback_data": "settings:back"}]]},
                 )
+            elif setting == "text_anim":
+                # ✨ the 3 entrance animations of the ayah + tafsir text.
+                send_message(
+                    chat_id,
+                    "✨ جۆری ئەنیمەیشنی نووسین هەڵبژێرە (بۆ ئایەت و تەفسیر):\n\n"
+                    "✨ فەیدی نەرم — نووسینەکە بە نەرمی و بەرەبەرە دەردەکەوێت\n"
+                    "⬆️ سەرکەوتن — نووسینەکە لە خوارەوەوە بەرز دەبێتەوە\n"
+                    "🔍 زووم — نووسینی ئایەت بە نەرمی دەگەڕێتەوە شوێنی خۆی",
+                    keyboard_setting_values(setting),
+                )
             else:
                 send_message(chat_id, "هەڵبژاردەی خۆت بۆ %s دیاری بکە:" % label, keyboard_setting_values(setting))
             return
@@ -2506,7 +2668,7 @@ def handle_callback(callback):
             allowed = {
                 "ayah_color", "tafsir_color", "ayah_size", "tafsir_size",
                 "other_size", "ayah_y", "tafsir_y", "footer_size",
-                "ayah_font", "tafsir_font", "number_lang",
+                "ayah_font", "tafsir_font", "number_lang", "text_anim",
             }
             if not session or session.get("state") != "text_settings" or setting not in allowed:
                 raise ValueError("ڕێکخستنەکە دروست نییە.")
@@ -2530,6 +2692,11 @@ def handle_callback(callback):
                 # Ayah-number digit language: English (123) or Kurdish (١٢٣).
                 if raw not in qv.NUMBER_LANGS:
                     raise ValueError("هەڵبژاردەی ژمارە دروست نییە.")
+                value = raw
+            elif setting == "text_anim":
+                # Entrance animation of the ayah + tafsir text.
+                if raw not in TEXT_ANIMS:
+                    raise ValueError("ئەنیمەیشنەکە دروست نییە.")
                 value = raw
             elif setting.endswith("color"):
                 value = tuple(int(x) for x in raw.split(","))
