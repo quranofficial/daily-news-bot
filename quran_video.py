@@ -592,7 +592,7 @@ def render_overlay_parts(ayah, include_tafsir=True, settings=None):
     tafsir_size = int(settings.get("tafsir_size", 30))
     other_size = int(settings.get("other_size", 24))
     ayah_y = int(settings.get("ayah_y", 250))
-    tafsir_y = int(settings.get("tafsir_y", 690))
+    tafsir_y = int(settings.get("tafsir_y", 680))
     other_y = int(settings.get("other_y", 115))
     footer_size = max(12, int(settings.get("footer_size", 34)))
     ayah_font_key_raw = str(settings.get("ayah_font") or DEFAULT_AYAH_FONT)
@@ -666,12 +666,19 @@ def render_overlay_parts(ayah, include_tafsir=True, settings=None):
     })
 
     if include_tafsir:
+        # Keep the tafsir band clear of the bottom info block: cap the
+        # band so long tafsir text NEVER reaches the footer / surah
+        # name area (they used to touch and sometimes overlap).
+        tafsir_band = min(
+            int(settings.get("tafsir_height", 400)),
+            1080 - tafsir_y,
+        )
         ops_tafsir.append({
             "kind": "block",
             "top": tafsir_y,
             "plan": plan_rtl_block(
                 ayah.get("tafsir", ""), WIDTH - 90, tafsir_size,
-                max_lines=50, line_gap=5, max_height=int(settings.get("tafsir_height", 430)),
+                max_lines=50, line_gap=5, max_height=max(120, tafsir_band),
                 use_quran_font=False, font_key=tafsir_font_key, custom_font_path=tafsir_custom,
             ),
             "fill": tafsir_color,
@@ -681,7 +688,7 @@ def render_overlay_parts(ayah, include_tafsir=True, settings=None):
     # but the surah name + ayah number stay available in both states.
     show_footer = bool(settings.get("show_footer", True))
     if include_tafsir:
-        footer_y = int(settings.get("footer_y", 1145))
+        footer_y = int(settings.get("footer_y", 1150))
     else:
         footer_y = int(settings.get("footer_y", 1045))
 
@@ -698,15 +705,15 @@ def render_overlay_parts(ayah, include_tafsir=True, settings=None):
             "fill": other_color,
             "anchor": "mm",
         })
-        surah_offset = 34
+        surah_offset = 44
     else:
         # No footer text: move the surah info up into the freed space.
-        surah_offset = 8
+        surah_offset = 10
 
     if show_info and info_pos == "bottom":
         info_size = max(12, int(settings.get("other_size", 24)))
         surah_y = footer_y + surah_offset
-        ayah_y_footer = surah_y + 28
+        ayah_y_footer = surah_y + 32
         # The database name already includes "سورەتی" (e.g. سورەتی الفاتحة),
         # so no extra prefix is added here.
         label_ops.append({

@@ -92,8 +92,9 @@ def text_anim_label(key):
 # CONCURRENCY (multiple users at the same time)
 # =========================
 
-# How many videos can be built simultaneously (4-5 by default).
-MAX_CONCURRENT_JOBS = int(os.environ.get("MAX_CONCURRENT_JOBS", "5"))
+# How many videos can be built simultaneously. Lower value = each video
+# renders faster (less CPU contention on the 2-4 core Actions runner).
+MAX_CONCURRENT_JOBS = int(os.environ.get("MAX_CONCURRENT_JOBS", "3"))
 JOB_SLOTS = threading.BoundedSemaphore(MAX_CONCURRENT_JOBS)
 
 # chat_ids that currently have a running video job.
@@ -132,7 +133,7 @@ def default_text_settings():
         "tafsir_size": 30,
         "other_size": 24,
         "ayah_y": 250,
-        "tafsir_y": 690,
+        "tafsir_y": 680,
         "other_y": 115,
         # Entrance animation of the ayah + tafsir text (see TEXT_ANIMS).
         "text_anim": "fade",
@@ -1508,6 +1509,15 @@ def build_video(chat_id, ayahs, reciter_id, background_path=None, background_kin
         darkness_value = max(0, min(100, int(background_darkness)))
         brightness = -darkness_value / 100.0
 
+        # ---- Telegram 50MB upload limit (HTTP 413 fix) ----
+        # Bots can upload at most 50MB per HTTP request. Budget the
+        # bitrate so the FINAL concatenated file always stays safely
+        # below that limit: short videos keep full CRF quality, long
+        # recitations get rate-capped instead of failing with 413.
+        budget_kbps = (45.0 * 8 * 1024) / max(1.0, total_duration)
+        audio_kbps = 64
+        video_max_kbps = max(80, int(budget_kbps) - audio_kbps)
+
         # Video backgrounds are rendered ONCE as a continuous track,
         # so the background never restarts when the ayah changes.
         # Image backgrounds are now perfectly STATIC (no zoom, no
@@ -1623,8 +1633,11 @@ def build_video(chat_id, ayahs, reciter_id, background_path=None, background_kin
                 ),
                 "-map", "[v]", "-map", "%d:a:0" % audio_index,
                 "-t", "%.3f" % duration,
-                "-c:v", "libx264", "-preset", "veryfast",
-                "-c:a", "aac", "-b:a", "128k",
+                "-c:v", "libx264", "-preset", "superfast",
+                "-crf", "23",
+                "-maxrate", "%dk" % video_max_kbps,
+                "-bufsize", "%dk" % (video_max_kbps * 2),
+                "-c:a", "aac", "-b:a", "%dk" % audio_kbps, "-ac", "1",
                 "-pix_fmt", "yuv420p", "-shortest",
                 "-movflags", "+faststart", clip_path,
             ]
@@ -1670,6 +1683,28 @@ def build_video(chat_id, ayahs, reciter_id, background_path=None, background_kin
             raise RuntimeError(
                 "فایلی ڤیدیۆی کۆتایی دروست نەکرا."
             )
+
+        # Last safety net for extremely long recitations: if the file is
+        # still above the Telegram upload limit, shrink it once with a
+        # hard bitrate cap so sending always succeeds.
+        if os.path.getsize(output) > 46 * 1024 * 1024:
+            report(88, "بچووککردنەوەی ڤیدیۆ بۆ ناردن...")
+            shrunk = os.path.join(job_dir, "quran_video_small.mp4")
+            final_kbps = max(
+                50,
+                int((44.0 * 8 * 1024) / max(1.0, total_duration)) - audio_kbps,
+            )
+            run_ffmpeg([
+                "ffmpeg", "-y", "-i", output,
+                "-c:v", "libx264", "-preset", "superfast",
+                "-b:v", "%dk" % final_kbps,
+                "-maxrate", "%dk" % final_kbps,
+                "-bufsize", "%dk" % (final_kbps * 2),
+                "-c:a", "copy",
+                "-pix_fmt", "yuv420p",
+                "-movflags", "+faststart", shrunk,
+            ])
+            os.replace(shrunk, output)
 
         report(90, "ڤیدیۆکە ئامادەیە")
 
