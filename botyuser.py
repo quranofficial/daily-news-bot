@@ -89,12 +89,38 @@ def text_anim_label(key):
 
 
 # =========================
+# VIDEO SIZE PRESETS (Facebook / TikTok / Instagram / Telegram / Gallery)
+# =========================
+
+# The user picks one of these BEFORE the video is built. Every preset
+# keeps the full 9:16 frame (no crop -> no text is ever lost):
+#   Facebook / TikTok / Instagram / Gallery -> 1080x1920
+#   Telegram  -> 720x1280 (light file, sends fast, never hits 413)
+#
+# budget_mb is the intermediate-file bitrate budget; segments are
+# rendered at 720x1280 first (fast) and 1080p presets get one final
+# Lanczos upscale pass.
+VIDEO_SIZE_PRESETS = {
+    "facebook":  {"label": "Facebook",  "width": 1080, "height": 1920, "crf": 22, "budget_mb": 180},
+    "tiktok":    {"label": "TikTok",    "width": 1080, "height": 1920, "crf": 21, "budget_mb": 180},
+    "instagram": {"label": "Instagram", "width": 1080, "height": 1920, "crf": 21, "budget_mb": 180},
+    "telegram":  {"label": "Telegram",  "width": 720,  "height": 1280, "crf": 20, "budget_mb": 45},
+    "gallery":   {"label": "Gallery",   "width": 1080, "height": 1920, "crf": 18, "budget_mb": 180},
+}
+DEFAULT_SIZE_PRESET = "telegram"
+
+# Telegram bots cannot upload more than 50MB per HTTP request (HTTP 413
+# Request Entity Too Large). Everything stays safely below that limit.
+TELEGRAM_SEND_LIMIT_MB = 48
+
+
+# =========================
 # CONCURRENCY (multiple users at the same time)
 # =========================
 
 # How many videos can be built simultaneously. Lower value = each video
 # renders faster (less CPU contention on the 2-4 core Actions runner).
-MAX_CONCURRENT_JOBS = int(os.environ.get("MAX_CONCURRENT_JOBS", "3"))
+MAX_CONCURRENT_JOBS = int(os.environ.get("MAX_CONCURRENT_JOBS", "2"))
 JOB_SLOTS = threading.BoundedSemaphore(MAX_CONCURRENT_JOBS)
 
 # chat_ids that currently have a running video job.
@@ -270,7 +296,8 @@ def send_help(chat_id):
         "٢. سوورەت دیاری بکە 📖\n"
         "٣. ژمارەی ئایەتی دەستپێک و کۆتایی بنووسە 🔢\n"
         "٤. پاشبنەما و تەفسیر هەڵبژێرە 🖼️\n"
-        "٥. ڕەنگ، فۆنت و ئەنیمەیشن ڕێک بخە ✨\n\n"
+        "٥. ڕەنگ، فۆنت و ئەنیمەیشن ڕێک بخە ✨\n"
+        "٦. قەبارەی ڤیدیۆ هەڵبژێرە (Facebook, TikTok, Instagram, Telegram, گەلەری) 📏\n\n"
         "💡 لە مینیووی ڕێکخستندا دوگمەی «🎲 دیزاینی هەڕەمەکی» هەیە "
         "کە بە یەک داگرتن دیزاینێکی جوانی نوێ بۆت دروست دەکات.",
         keyboard_start(),
@@ -889,6 +916,7 @@ def download_surah_audio(surah_number, reciter_id, output_path):
             stdout=subprocess.PIPE,
             stderr=subprocess.PIPE,
             text=True,
+            encoding="utf-8", errors="replace",
         )
 
         if proc.returncode != 0:
@@ -1073,6 +1101,7 @@ def get_audio_duration(audio_path):
         stdout=subprocess.PIPE,
         stderr=subprocess.PIPE,
         text=True,
+        encoding="utf-8", errors="replace",
     )
 
     if proc.returncode != 0:
@@ -1278,6 +1307,7 @@ def run_ffmpeg(args):
         stdout=subprocess.PIPE,
         stderr=subprocess.PIPE,
         text=True,
+        encoding="utf-8", errors="replace",
     )
 
     if proc.returncode != 0:
@@ -1292,8 +1322,79 @@ def run_ffmpeg(args):
         )
 
 
-def _segment_filter_graph(anim, include_tafsir, bg_chain, duration):
+def get_media_duration(path):
+    """Duration of an audio/video file in seconds (0.0 when unknown)."""
+    probe = subprocess.run(
+        [
+            "ffprobe", "-v", "error",
+            "-show_entries", "format=duration",
+            "-of", "default=noprint_wrappers=1:nokey=1",
+            path,
+        ],
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        text=True,
+        encoding="utf-8", errors="replace",
+    )
+    try:
+        return float(probe.stdout.strip().splitlines()[0])
+    except (ValueError, IndexError):
+        return 0.0
+
+
+def _is_too_large_error(exc):
+    """True when a Telegram send failed because the file was too big."""
+    text = str(exc)
+    return (
+        "413" in text
+        or "Too Large" in text
+        or "too large" in text
+        or "Request Entity" in text
+        or "ENTITY" in text.upper()
+    )
+
+
+def shrink_video_for_send(path, target_mb=40):
+    """Hard-cap a video file so a send can never fail with HTTP 413."""
+    duration = get_media_duration(path)
+    send_kbps = max(
+        50,
+        int((target_mb * 8 * 1024) / max(0.5, duration)) - 64,
+    )
+
+    if path.endswith(".mp4"):
+        out = path[:-4] + "_send.mp4"
+    else:
+        out = path + "_send.mp4"
+
+    run_ffmpeg([
+        "ffmpeg", "-y", "-i", path,
+        "-c:v", "libx264", "-preset", "veryfast",
+        "-b:v", "%dk" % send_kbps,
+        "-maxrate", "%dk" % send_kbps,
+        "-bufsize", "%dk" % (send_kbps * 2),
+        "-c:a", "copy",
+        "-pix_fmt", "yuv420p",
+        "-movflags", "+faststart",
+        out,
+    ])
+
+    return out
+
+
+def _segment_filter_graph(anim, include_tafsir, bg_chain, duration, first_segment=False):
     """Build the -filter_complex string for one ayah segment.
+
+    Input order: 0=background, 1=info layer (surah name + ayah number +
+    footer text), 2=ayah layer, 3=tafsir layer, then the audio input.
+
+    ANIMATION RULES (as requested by the user):
+      - ayah layer   -> animated on EVERY ayah
+      - tafsir layer -> animated on EVERY ayah
+      - info layer   -> animated ONLY on the FIRST ayah segment; after
+        that it is drawn instantly (no fade, no motion), so the footer
+        text "قورئانی پیرۆز - ڕێگای ئیسلام" and the surah name stay
+        perfectly still while the ayah changes.
 
     Five FAST entrance animations for the text (ayah first, tafsir
     follows just a blink later). Every animation fully settles in
@@ -1307,99 +1408,120 @@ def _segment_filter_graph(anim, include_tafsir, bg_chain, duration):
     zoom_frames = int(duration * 24) + 30  # zoompan output frames (+1s buffer)
     parts = [bg_chain]
 
-    # Fast timing: the ayah appears in ~0.4s, the tafsir follows 0.15s
-    # later, so the whole entrance finishes in well under one second.
-    TAFSIR_STAGGER = 0.15
+    # On the first segment the info layer leads at t=0, the ayah starts
+    # 0.15s later and the tafsir another 0.15s after that. On later
+    # segments the info layer is already on screen, so the ayah starts
+    # at t=0 again (exactly like before).
+    ayah_delay = 0.15 if first_segment else 0.0
+    tafsir_delay = 0.30 if first_segment else 0.15
+
+    # --- info layer: animated once on the first segment, then static ---
+    if first_segment:
+        parts.append(
+            "[1:v]scale=720:1280,format=rgba,"
+            "fade=t=in:st=0:d=0.40:alpha=1[ovI];"
+        )
+    else:
+        # Static: visible immediately, no animation at all.
+        parts.append("[1:v]scale=720:1280,format=rgba[ovI];")
+
+    info_merge = "[bg][ovI]overlay=x=0:y=0[bg0];"
 
     if anim == "rise":
         parts.append(
-            "[1:v]scale=720:1280,format=rgba,"
-            "fade=t=in:st=0:d=0.35:alpha=1[ovA];"
+            "[2:v]scale=720:1280,format=rgba,"
+            "fade=t=in:st=%.2f:d=0.35:alpha=1[ovA];" % ayah_delay
         )
         ayah_merge = (
-            "[bg][ovA]overlay=x=0:y='pow(1-min(t/0.45,1),3)*80':eval=frame"
+            "[bg0][ovA]overlay=x=0"
+            ":y='pow(1-min(max(t-%.2f,0)/0.45,1),3)*80':eval=frame" % ayah_delay
         )
         tafsir_chain = (
-            "[2:v]scale=720:1280,format=rgba,"
-            "fade=t=in:st=%.2f:d=0.35:alpha=1[ovB];" % TAFSIR_STAGGER
+            "[3:v]scale=720:1280,format=rgba,"
+            "fade=t=in:st=%.2f:d=0.35:alpha=1[ovB];" % tafsir_delay
         )
         tafsir_merge = (
-            "[o1][ovB]overlay=x=0:y='pow(1-min(max(t-%.2f,0)/0.45,1),3)*70'"
-            ":eval=frame" % TAFSIR_STAGGER
+            "[o1][ovB]overlay=x=0"
+            ":y='pow(1-min(max(t-%.2f,0)/0.45,1),3)*70'"
+            ":eval=frame" % tafsir_delay
         )
     elif anim == "zoom":
         parts.append(
-            "[1:v]format=rgba,"
+            "[2:v]format=rgba,"
             "zoompan=z='1.08-0.08*min(on/14,1)'"
             ":x='iw/2-(iw/zoom/2)':y='ih/2-(ih/zoom/2)'"
             ":d=%d:s=720x1280:fps=24,format=rgba,"
-            "fade=t=in:st=0:d=0.30:alpha=1[ovA];" % zoom_frames
+            "fade=t=in:st=%.2f:d=0.30:alpha=1[ovA];" % (zoom_frames, ayah_delay)
         )
-        ayah_merge = "[bg][ovA]overlay=x=0:y=0"
+        ayah_merge = "[bg0][ovA]overlay=x=0:y=0"
         tafsir_chain = (
-            "[2:v]scale=720:1280,format=rgba,"
-            "fade=t=in:st=%.2f:d=0.40:alpha=1[ovB];" % TAFSIR_STAGGER
+            "[3:v]scale=720:1280,format=rgba,"
+            "fade=t=in:st=%.2f:d=0.40:alpha=1[ovB];" % tafsir_delay
         )
         tafsir_merge = "[o1][ovB]overlay=x=0:y=0"
     elif anim == "slide":
         # Glide in from the right edge with an ease-out curve,
         # which feels natural for right-to-left text.
         parts.append(
-            "[1:v]scale=720:1280,format=rgba,"
-            "fade=t=in:st=0:d=0.30:alpha=1[ovA];"
+            "[2:v]scale=720:1280,format=rgba,"
+            "fade=t=in:st=%.2f:d=0.30:alpha=1[ovA];" % ayah_delay
         )
         ayah_merge = (
-            "[bg][ovA]overlay=x='(1-pow(1-min(t/0.45,1),3))*720'"
-            ":y=0:eval=frame"
+            "[bg0][ovA]overlay=x='(1-pow(1-min(max(t-%.2f,0)/0.45,1),3))*720'"
+            ":y=0:eval=frame" % ayah_delay
         )
         tafsir_chain = (
-            "[2:v]scale=720:1280,format=rgba,"
-            "fade=t=in:st=%.2f:d=0.35:alpha=1[ovB];" % TAFSIR_STAGGER
+            "[3:v]scale=720:1280,format=rgba,"
+            "fade=t=in:st=%.2f:d=0.35:alpha=1[ovB];" % tafsir_delay
         )
         tafsir_merge = (
             "[o1][ovB]overlay=x='(1-pow(1-min(max(t-%.2f,0)/0.45,1),3))*720'"
-            ":y=0:eval=frame" % TAFSIR_STAGGER
+            ":y=0:eval=frame" % tafsir_delay
         )
     elif anim == "drop":
         # Descend softly from above, like the mirror of "rise".
         parts.append(
-            "[1:v]scale=720:1280,format=rgba,"
-            "fade=t=in:st=0:d=0.35:alpha=1[ovA];"
+            "[2:v]scale=720:1280,format=rgba,"
+            "fade=t=in:st=%.2f:d=0.35:alpha=1[ovA];" % ayah_delay
         )
         ayah_merge = (
-            "[bg][ovA]overlay=x=0:y='-pow(1-min(t/0.45,1),3)*90':eval=frame"
+            "[bg0][ovA]overlay=x=0"
+            ":y='-pow(1-min(max(t-%.2f,0)/0.45,1),3)*90':eval=frame" % ayah_delay
         )
         tafsir_chain = (
-            "[2:v]scale=720:1280,format=rgba,"
-            "fade=t=in:st=%.2f:d=0.35:alpha=1[ovB];" % TAFSIR_STAGGER
+            "[3:v]scale=720:1280,format=rgba,"
+            "fade=t=in:st=%.2f:d=0.35:alpha=1[ovB];" % tafsir_delay
         )
         tafsir_merge = (
-            "[o1][ovB]overlay=x=0:y='-pow(1-min(max(t-%.2f,0)/0.45,1),3)*70'"
-            ":eval=frame" % TAFSIR_STAGGER
+            "[o1][ovB]overlay=x=0"
+            ":y='-pow(1-min(max(t-%.2f,0)/0.45,1),3)*70'"
+            ":eval=frame" % tafsir_delay
         )
     else:  # fade (default)
         parts.append(
-            "[1:v]scale=720:1280,format=rgba,"
-            "fade=t=in:st=0:d=0.40:alpha=1[ovA];"
-        )
-        ayah_merge = "[bg][ovA]overlay=x=0:y=0"
-        tafsir_chain = (
             "[2:v]scale=720:1280,format=rgba,"
-            "fade=t=in:st=%.2f:d=0.40:alpha=1[ovB];" % TAFSIR_STAGGER
+            "fade=t=in:st=%.2f:d=0.40:alpha=1[ovA];" % ayah_delay
+        )
+        ayah_merge = "[bg0][ovA]overlay=x=0:y=0"
+        tafsir_chain = (
+            "[3:v]scale=720:1280,format=rgba,"
+            "fade=t=in:st=%.2f:d=0.40:alpha=1[ovB];" % tafsir_delay
         )
         tafsir_merge = "[o1][ovB]overlay=x=0:y=0"
 
     if include_tafsir:
         parts.append(tafsir_chain)
+        parts.append(info_merge)
         parts.append(ayah_merge + "[o1];")
         parts.append(tafsir_merge + ":shortest=1[v]")
     else:
+        parts.append(info_merge)
         parts.append(ayah_merge + ":shortest=1[v]")
 
     return "".join(parts)
 
 
-def build_video(chat_id, ayahs, reciter_id, background_path=None, background_kind="image", background_darkness=0, include_tafsir=True, text_settings=None, progress=None):
+def build_video(chat_id, ayahs, reciter_id, background_path=None, background_kind="image", background_darkness=0, include_tafsir=True, text_settings=None, progress=None, size_preset=None):
     stamp = str(int(time.time()))
 
     job_dir = os.path.join(
@@ -1411,8 +1533,8 @@ def build_video(chat_id, ayahs, reciter_id, background_path=None, background_kin
     os.makedirs(job_dir, exist_ok=True)
 
     log_error(
-        "VIDEO JOB START | chat_id=%s | reciter_id=%s | job_dir=%s"
-        % (chat_id, reciter_id, job_dir)
+        "VIDEO JOB START | chat_id=%s | reciter_id=%s | size=%s | job_dir=%s"
+        % (chat_id, reciter_id, size_preset, job_dir)
     )
 
     def report(percent, label=""):
@@ -1427,6 +1549,12 @@ def build_video(chat_id, ayahs, reciter_id, background_path=None, background_kin
     text_anim = str((text_settings or {}).get("text_anim", "fade") or "fade").lower()
     if text_anim not in TEXT_ANIMS:
         text_anim = "fade"
+
+    # Which size preset (Facebook / TikTok / Instagram / Telegram / Gallery).
+    preset = VIDEO_SIZE_PRESETS.get(
+        str(size_preset or "").strip().lower(),
+        VIDEO_SIZE_PRESETS[DEFAULT_SIZE_PRESET],
+    )
 
     try:
         surah_number = int(ayahs[0]["surah_number"])
@@ -1509,21 +1637,25 @@ def build_video(chat_id, ayahs, reciter_id, background_path=None, background_kin
         darkness_value = max(0, min(100, int(background_darkness)))
         brightness = -darkness_value / 100.0
 
-        # ---- Telegram 50MB upload limit (HTTP 413 fix) ----
-        # Bots can upload at most 50MB per HTTP request. Budget the
-        # bitrate so the FINAL concatenated file always stays safely
-        # below that limit: short videos keep full CRF quality, long
-        # recitations get rate-capped instead of failing with 413.
-        budget_kbps = (45.0 * 8 * 1024) / max(1.0, total_duration)
         audio_kbps = 64
+
+        # ---- Bitrate budget ----
+        # For the Telegram preset (and any final send) bots can upload at
+        # most 50MB per HTTP request (HTTP 413). Budget the bitrate so the
+        # final file stays safely below that limit. Bigger presets (Gallery,
+        # TikTok, ...) get a generous budget: their full-quality file may
+        # exceed 50MB and is then auto-compressed into a sendable copy.
+        budget_mb = float(preset.get("budget_mb", 45))
+        budget_kbps = (budget_mb * 8 * 1024) / max(1.0, total_duration)
         video_max_kbps = max(80, int(budget_kbps) - audio_kbps)
 
-        # Video backgrounds are rendered ONCE as a continuous track,
-        # so the background never restarts when the ayah changes.
-        # Image backgrounds are now perfectly STATIC (no zoom, no
-        # movement at all); both keep a gentle colour lift and a soft
-        # cinematic vignette.
+        # ---- SPEED: pre-render the STATIC background ONCE ----
+        # The scale/crop/eq/vignette chain used to run on EVERY frame of
+        # EVERY segment; now it runs a single time and every segment
+        # reuses the finished 720x1280 picture. This is the biggest
+        # rendering speed-up for image and black backgrounds.
         background_full = None
+        bg_static = None
 
         if background_kind == "video":
             if not background_path or not os.path.isfile(background_path):
@@ -1548,6 +1680,32 @@ def build_video(chat_id, ayahs, reciter_id, background_path=None, background_kin
                 "-an",
                 background_full,
             ])
+        else:
+            report(14, "ئامادەکردنی پاشبنەما...")
+
+            bg_static = os.path.join(job_dir, "bg_static.png")
+
+            if background_kind == "black":
+                Image.new(
+                    "RGB", (qv.WIDTH, qv.HEIGHT), (0, 0, 0)
+                ).save(bg_static)
+            else:
+                if not background_path or not os.path.isfile(background_path):
+                    raise RuntimeError("Background ـی هەڵبژێردراو نەدۆزرایەوە.")
+
+                # One single frame -> the whole look (scale, crop,
+                # colour lift, vignette, darkness) is baked in once.
+                run_ffmpeg([
+                    "ffmpeg", "-y",
+                    "-i", background_path,
+                    "-vf",
+                    "scale=720:1280:force_original_aspect_ratio=increase,"
+                    "crop=720:1280,"
+                    "eq=brightness=%.2f:saturation=1.14:contrast=1.05,"
+                    "vignette=a=PI/5.5,format=rgb24" % brightness,
+                    "-frames:v", "1",
+                    bg_static,
+                ])
 
         clips = []
         total_segments = max(1, len(segments))
@@ -1563,8 +1721,14 @@ def build_video(chat_id, ayahs, reciter_id, background_path=None, background_kin
                 % (i, total_segments, ayah["ayah_number"]),
             )
 
-            # The ayah and the tafsir are rendered as TWO transparent
-            # layers, so they can be animated independently.
+            # The ayah, the tafsir and the info labels are rendered as
+            # THREE transparent layers, so they can be animated
+            # independently (info only on the first ayah).
+            info_png = os.path.join(
+                job_dir,
+                "info_%03d.png" % i,
+            )
+
             ayah_png = os.path.join(
                 job_dir,
                 "ayah_%03d.png" % i,
@@ -1582,26 +1746,14 @@ def build_video(chat_id, ayahs, reciter_id, background_path=None, background_kin
 
             qv.create_overlay_parts(
                 ayah,
+                info_png,
                 ayah_png,
                 tafsir_png,
                 include_tafsir=include_tafsir,
                 settings=text_settings or {},
             )
 
-            if background_kind == "black":
-                bg_input = ["-f", "lavfi", "-i", "color=c=black:s=720x1280:r=24"]
-                bg_chain = "[0:v]eq=brightness=%.2f[bg];" % brightness
-            elif background_kind == "image":
-                # Perfectly STATIC image background: the picture never
-                # moves, zooms or slides — only the text is animated.
-                bg_input = ["-loop", "1", "-framerate", "24", "-i", background_path]
-                bg_chain = (
-                    "[0:v]scale=720:1280:force_original_aspect_ratio=increase,"
-                    "crop=720:1280,"
-                    "eq=brightness=%.2f:saturation=1.14:contrast=1.05,"
-                    "vignette=a=PI/5.5[bg];" % brightness
-                )
-            else:
+            if background_kind == "video":
                 # Video backgrounds continue the shared pre-rendered
                 # track exactly where the previous ayah stopped
                 # (no restart between ayahs).
@@ -1610,31 +1762,41 @@ def build_video(chat_id, ayahs, reciter_id, background_path=None, background_kin
                     "-i", background_full,
                 ]
                 bg_chain = "[0:v]null[bg];"
-
-            # Overlay inputs; the zoom animation feeds zoompan a single
-            # frame instead of a loop (zoompan generates the frames itself).
-            if text_anim == "zoom":
-                overlay_inputs = ["-i", ayah_png]
             else:
-                overlay_inputs = ["-loop", "1", "-i", ayah_png]
+                # Pre-rendered static picture: only decoded, never
+                # re-scaled or re-filtered per frame (big speed win).
+                bg_input = ["-loop", "1", "-framerate", "24", "-i", bg_static]
+                bg_chain = "[0:v]format=rgba[bg];"
+
+            # Overlay inputs: 1=info, 2=ayah, 3=tafsir.
+            # The zoom animation feeds zoompan a single frame instead
+            # of a loop (zoompan generates the frames itself).
+            overlay_inputs = ["-loop", "1", "-i", info_png]
+
+            if text_anim == "zoom":
+                overlay_inputs += ["-i", ayah_png]
+            else:
+                overlay_inputs += ["-loop", "1", "-i", ayah_png]
 
             if include_tafsir:
                 overlay_inputs += ["-loop", "1", "-i", tafsir_png]
 
-            # bg(1 input) + overlays + audio
-            audio_index = 1 + (2 if include_tafsir else 1)
+            # bg(1 input) + info + ayah + tafsir(optional) -> audio index
+            # inputs: 0=bg, 1=info, 2=ayah, 3=tafsir(optional), audio=next
+            audio_index = 4 if include_tafsir else 3
 
             ffmpeg_args = ["ffmpeg", "-y"] + bg_input + overlay_inputs + [
                 "-ss", "%.3f" % segment["start"],
                 "-i", full_audio_path,
                 "-filter_complex",
                 _segment_filter_graph(
-                    text_anim, include_tafsir, bg_chain, duration
+                    text_anim, include_tafsir, bg_chain, duration,
+                    first_segment=(i == 1),
                 ),
                 "-map", "[v]", "-map", "%d:a:0" % audio_index,
                 "-t", "%.3f" % duration,
                 "-c:v", "libx264", "-preset", "superfast",
-                "-crf", "23",
+                "-crf", "20",
                 "-maxrate", "%dk" % video_max_kbps,
                 "-bufsize", "%dk" % (video_max_kbps * 2),
                 "-c:a", "aac", "-b:a", "%dk" % audio_kbps, "-ac", "1",
@@ -1661,9 +1823,9 @@ def build_video(chat_id, ayahs, reciter_id, background_path=None, background_kin
                 safe_clip = clip.replace("'", "'\\''")
                 f.write("file '%s'\n" % safe_clip)
 
-        output = os.path.join(
+        base_path = os.path.join(
             job_dir,
-            "quran_video.mp4",
+            "quran_video_base.mp4",
         )
 
         run_ffmpeg([
@@ -1673,47 +1835,94 @@ def build_video(chat_id, ayahs, reciter_id, background_path=None, background_kin
             "-i", list_path,
             "-c", "copy",
             "-movflags", "+faststart",
-            output,
+            base_path,
         ])
 
         if (
-            not os.path.isfile(output)
-            or os.path.getsize(output) == 0
+            not os.path.isfile(base_path)
+            or os.path.getsize(base_path) == 0
         ):
             raise RuntimeError(
                 "فایلی ڤیدیۆی کۆتایی دروست نەکرا."
             )
 
-        # Last safety net for extremely long recitations: if the file is
-        # still above the Telegram upload limit, shrink it once with a
-        # hard bitrate cap so sending always succeeds.
-        if os.path.getsize(output) > 46 * 1024 * 1024:
-            report(88, "بچووککردنەوەی ڤیدیۆ بۆ ناردن...")
-            shrunk = os.path.join(job_dir, "quran_video_small.mp4")
-            final_kbps = max(
-                50,
-                int((44.0 * 8 * 1024) / max(1.0, total_duration)) - audio_kbps,
-            )
+        # ---- Final quality pass for the chosen size ----
+        # Segments are rendered fast at 720x1280; 1080p presets get ONE
+        # Lanczos upscale + encode pass with the preset quality.
+        output = os.path.join(job_dir, "quran_video.mp4")
+
+        if (preset["width"], preset["height"]) != (qv.WIDTH, qv.HEIGHT):
+            report(86, "ئامادەکردنی کوالیتی %s..." % preset["label"])
+
             run_ffmpeg([
-                "ffmpeg", "-y", "-i", output,
-                "-c:v", "libx264", "-preset", "superfast",
-                "-b:v", "%dk" % final_kbps,
-                "-maxrate", "%dk" % final_kbps,
-                "-bufsize", "%dk" % (final_kbps * 2),
+                "ffmpeg", "-y",
+                "-i", base_path,
+                "-vf", "scale=%d:%d:flags=lanczos" % (preset["width"], preset["height"]),
+                "-c:v", "libx264", "-preset", "veryfast",
+                "-crf", str(preset["crf"]),
                 "-c:a", "copy",
                 "-pix_fmt", "yuv420p",
-                "-movflags", "+faststart", shrunk,
+                "-movflags", "+faststart",
+                output,
             ])
+        else:
+            os.replace(base_path, output)
+
+        # ---- Last safety net: Telegram 50MB upload limit (HTTP 413) ----
+        # If the final file is too big for a bot upload, build a smaller
+        # sendable copy in a few quality steps; the note tells the user.
+        send_note = None
+
+        if os.path.getsize(output) > TELEGRAM_SEND_LIMIT_MB * 1024 * 1024:
+            report(90, "بچووککردنەوەی ڤیدیۆ بۆ ناردن...")
+            original_mb = os.path.getsize(output) / (1024.0 * 1024.0)
+            shrunk = None
+
+            for target_mb in (46, 40, 32, 24, 16):
+                candidate = os.path.join(job_dir, "send_%dmb.mp4" % target_mb)
+                send_kbps = max(
+                    50,
+                    int((target_mb * 8 * 1024) / max(1.0, total_duration)) - audio_kbps,
+                )
+
+                shrink_args = ["ffmpeg", "-y", "-i", output]
+
+                if send_kbps < 1500 and preset["width"] > qv.WIDTH:
+                    shrink_args += [
+                        "-vf", "scale=%d:%d:flags=lanczos" % (qv.WIDTH, qv.HEIGHT),
+                    ]
+
+                shrink_args += [
+                    "-c:v", "libx264", "-preset", "veryfast",
+                    "-b:v", "%dk" % send_kbps,
+                    "-maxrate", "%dk" % send_kbps,
+                    "-bufsize", "%dk" % (send_kbps * 2),
+                    "-c:a", "copy",
+                    "-pix_fmt", "yuv420p",
+                    "-movflags", "+faststart",
+                    candidate,
+                ]
+                run_ffmpeg(shrink_args)
+                shrunk = candidate
+
+                if os.path.getsize(candidate) <= TELEGRAM_SEND_LIMIT_MB * 1024 * 1024:
+                    break
+
+            final_mb = os.path.getsize(shrunk) / (1024.0 * 1024.0)
+            send_note = (
+                "ℹ️ ڤیدیۆی ڕەسەن %.0fMB بوو و گەورەترە لە سنووری ناردنی تێلەگرام "
+                "(50MB)، بۆیە وەشانی بچووککراوە (%.0fMB) نێردرا بۆ تۆ." % (original_mb, final_mb)
+            )
             os.replace(shrunk, output)
 
-        report(90, "ڤیدیۆکە ئامادەیە")
+        report(92, "ڤیدیۆکە ئامادەیە")
 
         log_error(
-            "VIDEO JOB SUCCESS | output=%s | size=%s"
-            % (output, os.path.getsize(output))
+            "VIDEO JOB SUCCESS | output=%s | size=%s | preset=%s"
+            % (output, os.path.getsize(output), preset["label"])
         )
 
-        return output, job_dir
+        return output, job_dir, send_note
 
     except Exception as exc:
         log_exception("VIDEO JOB FAILED", exc)
@@ -1841,6 +2050,27 @@ def keyboard_tafsir():
     return {"inline_keyboard": [
         [{"text": "📖 لەگەڵ تەفسیر", "callback_data": "tafsir:on"}],
         [{"text": "🕋 تەنها ئایەت، بێ تەفسیر", "callback_data": "tafsir:off"}],
+    ]}
+
+
+def keyboard_video_size(current=None):
+    """Size/quality picker shown BEFORE the video is built.
+
+    Each platform gets its ideal resolution; the last choice of the
+    user is marked with a check mark (defaults to Telegram).
+    """
+    current = str(current or DEFAULT_SIZE_PRESET)
+
+    def mark(key):
+        return " ✔" if key == current else ""
+
+    return {"inline_keyboard": [
+        [{"text": "📘 Facebook — 1080×1920" + mark("facebook"), "callback_data": "size:facebook"}],
+        [{"text": "🎵 TikTok — 1080×1920" + mark("tiktok"), "callback_data": "size:tiktok"}],
+        [{"text": "📸 Instagram — 1080×1920" + mark("instagram"), "callback_data": "size:instagram"}],
+        [{"text": "✈️ Telegram — 720×1280 (خێرا و سووک)" + mark("telegram"), "callback_data": "size:telegram"}],
+        [{"text": "📱 گەلەری — 1080×1920 (باشترین کوالیتی)" + mark("gallery"), "callback_data": "size:gallery"}],
+        [{"text": "↩️ گەڕانەوە بۆ ڕێکخستن", "callback_data": "settings:back"}],
     ]}
 
 
@@ -2295,10 +2525,18 @@ def create_selected_video(chat_id):
         surah = next(s for s in get_surahs() if int(s["number"]) == surah_number)
         reciter_name = RECITERS[reciter_id]["name"]
 
+        # Chosen size preset (falls back to the user's last choice,
+        # then to Telegram).
+        size_preset = str(
+            session.get("size_preset")
+            or load_user_preferences().get(str(chat_id), {}).get("size_preset")
+            or DEFAULT_SIZE_PRESET
+        )
+
         progress = make_progress_reporter(chat_id)
         progress(2, "داواکاریەکەت تۆمار کرا")
 
-        video_path, job_dir = build_video(
+        video_path, job_dir, send_note = build_video(
             chat_id, ayahs, reciter_id,
             background_path=session.get("background_path"),
             background_kind=session.get("background_kind", "image"),
@@ -2308,10 +2546,29 @@ def create_selected_video(chat_id):
             include_tafsir=bool(session.get("include_tafsir", True)),
             text_settings=session.get("text_settings", {}),
             progress=progress,
+            size_preset=size_preset,
         )
 
         progress(93, "ناردنی ڤیدیۆ بۆ تۆ...")
-        send_video(chat_id, video_path, "قورئانی پیرۆز — %s\nقاری: %s\nئایەت %d–%d" % (surah["name"], reciter_name, start_ayah, end_ayah))
+
+        caption = "قورئانی پیرۆز — %s\nقاری: %s\nئایەت %d–%d" % (
+            surah["name"], reciter_name, start_ayah, end_ayah,
+        )
+
+        if send_note:
+            caption += "\n\n" + send_note
+
+        try:
+            send_video(chat_id, video_path, caption)
+        except Exception as send_exc:
+            # Final safety net: if Telegram still refused the upload
+            # (HTTP 413), shrink once more and retry.
+            if _is_too_large_error(send_exc):
+                progress(95, "قەبارە گەورەیە؛ بچووککردنەوە و دووبارە ناردن...")
+                smaller = shrink_video_for_send(video_path, 40)
+                send_video(chat_id, smaller, caption)
+            else:
+                raise
         progress(100, "✅ تەواو بوو!")
         send_message(
             chat_id,
@@ -2437,6 +2694,7 @@ def handle_message(message):
                     ["ffprobe", "-v", "error", "-show_entries", "format=duration",
                      "-of", "default=noprint_wrappers=1:nokey=1", destination],
                     stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True,
+                    encoding="utf-8", errors="replace",
                 )
                 if probe.returncode != 0:
                     raise RuntimeError("فایلەکە ڤیدیۆیەکی دروستی MP4 نییە.")
@@ -2941,11 +3199,13 @@ def handle_callback(callback):
         if data == "settings:back":
             answer_callback(callback_id)
             session = SESSIONS.get(chat_id)
-            # Leaving the "upload your font" or the "background darkness"
-            # step returns to the settings menu.
+            # Leaving the "upload your font", the "background darkness"
+            # or the "video size" step returns to the settings menu.
             if session and session.get("state") in ("await_font", "darkness_setting"):
                 session["state"] = "text_settings"
                 session.pop("font_slot", None)
+            elif session and session.get("state") == "size_choice":
+                session["state"] = "text_settings"
             send_message(chat_id, "🎨 ڕێکخستنی دەق:", keyboard_text_settings((session or {}).get("text_settings", saved_text_settings(chat_id))))
             return
 
@@ -2955,9 +3215,42 @@ def handle_callback(callback):
                 raise ValueError("تکایە /start دووبارە بکە.")
             save_text_settings(chat_id, session.get("text_settings", default_text_settings()))
             answer_callback(callback_id, "ڕێکخستنەکان هەڵگیرا")
-            # The 🌑 darkness value is already set inside the settings menu,
-            # so no extra question here — build the video right away.
+            # 🌑 darkness is set inside the settings menu; now ask for
+            # the video size (Facebook / TikTok / Instagram / Telegram /
+            # Gallery) BEFORE building the video.
+            session["state"] = "size_choice"
+            last_size = load_user_preferences().get(str(chat_id), {}).get("size_preset")
+            send_message(
+                chat_id,
+                "📏 قەبارەی ڤیدیۆکە چۆن بێت؟\n\n"
+                "بۆ هەر پلاتفۆرمێک قەبارەی گونجاو دانراوە:\n"
+                "• Facebook / TikTok / Instagram: 1080×1920\n"
+                "• Telegram: 720×1280 — سووکە و بە خێرایی دەنێردرێت\n"
+                "• گەلەری: بەرزترین کوالیتی بۆ پاشەکەوتکردن لە مۆبایل",
+                keyboard_video_size(last_size),
+            )
+            return
+
+        if data.startswith("size:"):
+            size_key = data.split(":", 1)[1]
+            if size_key not in VIDEO_SIZE_PRESETS:
+                raise ValueError("قەبارەی هەڵبژێردراو دروست نییە.")
+            session = SESSIONS.get(chat_id)
+            if not session or session.get("state") != "size_choice":
+                raise ValueError("تکایە /start دووبارە بکە.")
+            session["size_preset"] = size_key
             session["state"] = "design"
+            # Remember the choice for the next video.
+            all_prefs = load_user_preferences()
+            all_prefs.setdefault(str(chat_id), {})["size_preset"] = size_key
+            save_user_preferences(all_prefs)
+            answer_callback(callback_id, "قەبارە هەڵبژێردرا")
+            edit_message(
+                chat_id,
+                message_id,
+                "✅ قەبارەی هەڵبژێردراو: %s\n⏳ دروستکردنی ڤیدیۆ دەست پێ دەکات..."
+                % VIDEO_SIZE_PRESETS[size_key]["label"],
+            )
             create_selected_video(chat_id)
             return
 

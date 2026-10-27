@@ -569,19 +569,27 @@ def _paint_ops(ops, draw, shadow_pass):
 # video renderer can animate them independently (staggered entrance).
 # =========================
 def render_overlay_parts(ayah, include_tafsir=True, settings=None):
-    """Render the text as two RGBA layers; returns (ayah_img, tafsir_img|None).
+    """Render the text as THREE RGBA layers.
 
-    ayah layer:   top surah info + basmala + ayah text
-                  (plus footer / bottom info when tafsir is hidden)
-    tafsir layer: tafsir text + footer + bottom surah info
+    Returns (info_img, ayah_img, tafsir_img|None):
+
+    info layer  : surah name + ayah number + footer text
+                  (the video animates this layer ONLY on the first ayah;
+                   after that it is shown instantly, without animation)
+    ayah layer  : basmala + ayah text (always animated)
+    tafsir layer: tafsir text (always animated)
     """
     settings = settings or {}
+    info_img = Image.new("RGBA", (WIDTH, HEIGHT), (0, 0, 0, 0))
     ayah_img = Image.new("RGBA", (WIDTH, HEIGHT), (0, 0, 0, 0))
     tafsir_img = Image.new("RGBA", (WIDTH, HEIGHT), (0, 0, 0, 0))
+    info_shadow = Image.new("RGBA", (WIDTH, HEIGHT), (0, 0, 0, 0))
     ayah_shadow = Image.new("RGBA", (WIDTH, HEIGHT), (0, 0, 0, 0))
     tafsir_shadow = Image.new("RGBA", (WIDTH, HEIGHT), (0, 0, 0, 0))
+    info_draw = ImageDraw.Draw(info_img)
     ayah_draw = ImageDraw.Draw(ayah_img)
     tafsir_draw = ImageDraw.Draw(tafsir_img)
+    info_shadow_draw = ImageDraw.Draw(info_shadow)
     ayah_shadow_draw = ImageDraw.Draw(ayah_shadow)
     tafsir_shadow_draw = ImageDraw.Draw(tafsir_shadow)
 
@@ -614,11 +622,12 @@ def render_overlay_parts(ayah, include_tafsir=True, settings=None):
     if info_pos not in ("top", "bottom"):
         info_pos = "bottom"
 
+    ops_info = []
     ops_ayah = []
     ops_tafsir = []
 
     if show_info and info_pos == "top":
-        ops_ayah.append({
+        ops_info.append({
             "kind": "text",
             "xy": (WIDTH // 2, other_y),
             "text": shape_rtl(str(ayah.get("surah_name", ""))),
@@ -627,7 +636,7 @@ def render_overlay_parts(ayah, include_tafsir=True, settings=None):
             "anchor": "mm",
         })
         if settings.get("show_ayah_number", True):
-            ops_ayah.append({
+            ops_info.append({
                 "kind": "text",
                 "xy": (WIDTH // 2, other_y + other_size + 12),
                 "text": shape_rtl("ئایەتی " + format_number(ayah.get("ayah_number", ""), number_lang)),
@@ -671,7 +680,7 @@ def render_overlay_parts(ayah, include_tafsir=True, settings=None):
         # name area (they used to touch and sometimes overlap).
         tafsir_band = min(
             int(settings.get("tafsir_height", 400)),
-            1080 - tafsir_y,
+            1076 - tafsir_y,
         )
         ops_tafsir.append({
             "kind": "block",
@@ -686,16 +695,15 @@ def render_overlay_parts(ayah, include_tafsir=True, settings=None):
 
     # The footer text can now be hidden/shown by the user (toggle_footer),
     # but the surah name + ayah number stay available in both states.
+    # Every label (footer + surah name + ayah number) lives on the INFO
+    # layer, which the video animates only on the FIRST ayah.
     show_footer = bool(settings.get("show_footer", True))
-    if include_tafsir:
-        footer_y = int(settings.get("footer_y", 1150))
-    else:
-        footer_y = int(settings.get("footer_y", 1045))
+    footer_y = int(settings.get("footer_y", 1118))
+    label_ops = ops_info
 
-    # When tafsir is hidden the footer + bottom info join the ayah layer,
-    # so the whole video still animates as one beautiful unit.
-    label_ops = ops_tafsir if include_tafsir else ops_ayah
-
+    # Extra breathing room (margin) between the footer line and the
+    # surah name so the two never touch or overlap.
+    surah_gap = 62
     if show_footer:
         label_ops.append({
             "kind": "text",
@@ -705,15 +713,14 @@ def render_overlay_parts(ayah, include_tafsir=True, settings=None):
             "fill": other_color,
             "anchor": "mm",
         })
-        surah_offset = 44
     else:
-        # No footer text: move the surah info up into the freed space.
-        surah_offset = 10
+        # No footer text: place the surah info lower into the freed space.
+        surah_gap = 76
 
     if show_info and info_pos == "bottom":
         info_size = max(12, int(settings.get("other_size", 24)))
-        surah_y = footer_y + surah_offset
-        ayah_y_footer = surah_y + 32
+        surah_y = footer_y + surah_gap
+        ayah_num_y = surah_y + 36
         # The database name already includes "سورەتی" (e.g. سورەتی الفاتحة),
         # so no extra prefix is added here.
         label_ops.append({
@@ -726,7 +733,7 @@ def render_overlay_parts(ayah, include_tafsir=True, settings=None):
         })
         label_ops.append({
             "kind": "text",
-            "xy": (WIDTH // 2, ayah_y_footer),
+            "xy": (WIDTH // 2, ayah_num_y),
             "text": shape_rtl("ژمارەی ئایەت: " + format_number(ayah.get("ayah_number", ""), number_lang)),
             "font": make_tafsir_font(max(12, info_size - 2), tafsir_font_key, tafsir_custom),
             "fill": other_color,
@@ -735,6 +742,10 @@ def render_overlay_parts(ayah, include_tafsir=True, settings=None):
 
     # 1) paint the soft shadow silhouettes, blur them and composite them
     #    UNDER the text, then 2) paint the real text on top.
+    _paint_ops(ops_info, info_shadow_draw, shadow_pass=True)
+    info_img.alpha_composite(info_shadow.filter(ImageFilter.GaussianBlur(SHADOW_BLUR)))
+    _paint_ops(ops_info, info_draw, shadow_pass=False)
+
     _paint_ops(ops_ayah, ayah_shadow_draw, shadow_pass=True)
     ayah_img.alpha_composite(ayah_shadow.filter(ImageFilter.GaussianBlur(SHADOW_BLUR)))
     _paint_ops(ops_ayah, ayah_draw, shadow_pass=False)
@@ -744,12 +755,13 @@ def render_overlay_parts(ayah, include_tafsir=True, settings=None):
         tafsir_img.alpha_composite(tafsir_shadow.filter(ImageFilter.GaussianBlur(SHADOW_BLUR)))
         _paint_ops(ops_tafsir, tafsir_draw, shadow_pass=False)
 
-    return ayah_img, (tafsir_img if include_tafsir else None)
+    return info_img, ayah_img, (tafsir_img if include_tafsir else None)
 
 
-def create_overlay_parts(ayah, ayah_path, tafsir_path, include_tafsir=True, settings=None):
-    """Save the two transparent text layers as PNG files for the video renderer."""
-    ayah_img, tafsir_img = render_overlay_parts(ayah, include_tafsir, settings)
+def create_overlay_parts(ayah, info_path, ayah_path, tafsir_path, include_tafsir=True, settings=None):
+    """Save the three transparent text layers as PNG files for the video renderer."""
+    info_img, ayah_img, tafsir_img = render_overlay_parts(ayah, include_tafsir, settings)
+    info_img.save(info_path)
     ayah_img.save(ayah_path)
 
     if tafsir_path:
@@ -761,7 +773,9 @@ def create_overlay_parts(ayah, ayah_path, tafsir_path, include_tafsir=True, sett
 
 def create_text_overlay(ayah, index, image_path, include_tafsir=True, settings=None):
     """Single combined transparent overlay (used for the live preview)."""
-    ayah_img, tafsir_img = render_overlay_parts(ayah, include_tafsir, settings)
+    info_img, ayah_img, tafsir_img = render_overlay_parts(ayah, include_tafsir, settings)
+
+    ayah_img.alpha_composite(info_img)
 
     if tafsir_img is not None:
         ayah_img.alpha_composite(tafsir_img)
