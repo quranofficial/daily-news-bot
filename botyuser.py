@@ -596,9 +596,9 @@ def send_photo(chat_id, path, caption):
 
 def send_background_previews(chat_id, kind):
     """Send previews only on first visit, unless the user explicitly asks again."""
-    if kind != "image":
-        kind = "image"  # background video was removed; only images remain
-    ext = "png"
+    if kind not in ("image", "video"):
+        kind = "image"
+    ext = "mp4" if kind == "video" else "png"
     for number in range(1, 11):
         local_path = os.path.join(BACKGROUND_DIR, "%d.%s" % (number, ext))
         if not os.path.isfile(local_path):
@@ -609,7 +609,10 @@ def send_background_previews(chat_id, kind):
                 send_message(chat_id, "⚠️ فایل %d.%s لە GitHub نییە. دڵنیابە ناوەکە و شوێنی فایلەکە ڕاستە." % (number, ext))
                 continue
         try:
-            send_photo(chat_id, local_path, "🖼️ وێنەی پاشبنەما %d/10" % number)
+            if kind == "video":
+                send_video(chat_id, local_path, "🎬 ڤیدیۆی پاشبنەما %d/10" % number)
+            else:
+                send_photo(chat_id, local_path, "🖼️ وێنەی پاشبنەما %d/10" % number)
         except Exception as exc:
             log_exception("BACKGROUND PREVIEW SEND FAILED", exc)
             send_message(chat_id, "نەتوانرا پێشبینینی فایل %d بنێردرێت." % number)
@@ -1291,8 +1294,9 @@ def run_ffmpeg(args):
 def _segment_filter_graph(anim, include_tafsir, bg_chain, duration):
     """Build the -filter_complex string for one ayah segment.
 
-    Five entrance animations for the text (ayah first, tafsir follows
-    slightly later so the entrance feels staggered and alive):
+    Five FAST entrance animations for the text (ayah first, tafsir
+    follows just a blink later). Every animation fully settles in
+    about half a second, so the text feels quick and snappy:
       fade  - soft alpha fade-in for both layers
       rise  - both layers gently rise up while fading in
       zoom  - the ayah settles from a slight zoom while fading in
@@ -1302,34 +1306,38 @@ def _segment_filter_graph(anim, include_tafsir, bg_chain, duration):
     zoom_frames = int(duration * 24) + 30  # zoompan output frames (+1s buffer)
     parts = [bg_chain]
 
+    # Fast timing: the ayah appears in ~0.4s, the tafsir follows 0.15s
+    # later, so the whole entrance finishes in well under one second.
+    TAFSIR_STAGGER = 0.15
+
     if anim == "rise":
         parts.append(
             "[1:v]scale=720:1280,format=rgba,"
-            "fade=t=in:st=0:d=0.80:alpha=1[ovA];"
+            "fade=t=in:st=0:d=0.35:alpha=1[ovA];"
         )
         ayah_merge = (
-            "[bg][ovA]overlay=x=0:y='pow(1-min(t/0.8,1),3)*80':eval=frame"
+            "[bg][ovA]overlay=x=0:y='pow(1-min(t/0.45,1),3)*80':eval=frame"
         )
         tafsir_chain = (
             "[2:v]scale=720:1280,format=rgba,"
-            "fade=t=in:st=0.45:d=0.70:alpha=1[ovB];"
+            "fade=t=in:st=%.2f:d=0.35:alpha=1[ovB];" % TAFSIR_STAGGER
         )
         tafsir_merge = (
-            "[o1][ovB]overlay=x=0:y='pow(1-min(max(t-0.45,0)/0.75,1),3)*70'"
-            ":eval=frame"
+            "[o1][ovB]overlay=x=0:y='pow(1-min(max(t-%.2f,0)/0.45,1),3)*70'"
+            ":eval=frame" % TAFSIR_STAGGER
         )
     elif anim == "zoom":
         parts.append(
             "[1:v]format=rgba,"
-            "zoompan=z='1.08-0.08*min(on/36,1)'"
+            "zoompan=z='1.08-0.08*min(on/14,1)'"
             ":x='iw/2-(iw/zoom/2)':y='ih/2-(ih/zoom/2)'"
             ":d=%d:s=720x1280:fps=24,format=rgba,"
-            "fade=t=in:st=0:d=0.50:alpha=1[ovA];" % zoom_frames
+            "fade=t=in:st=0:d=0.30:alpha=1[ovA];" % zoom_frames
         )
         ayah_merge = "[bg][ovA]overlay=x=0:y=0"
         tafsir_chain = (
             "[2:v]scale=720:1280,format=rgba,"
-            "fade=t=in:st=0.40:d=0.85:alpha=1[ovB];"
+            "fade=t=in:st=%.2f:d=0.40:alpha=1[ovB];" % TAFSIR_STAGGER
         )
         tafsir_merge = "[o1][ovB]overlay=x=0:y=0"
     elif anim == "slide":
@@ -1337,46 +1345,46 @@ def _segment_filter_graph(anim, include_tafsir, bg_chain, duration):
         # which feels natural for right-to-left text.
         parts.append(
             "[1:v]scale=720:1280,format=rgba,"
-            "fade=t=in:st=0:d=0.55:alpha=1[ovA];"
+            "fade=t=in:st=0:d=0.30:alpha=1[ovA];"
         )
         ayah_merge = (
-            "[bg][ovA]overlay=x='(1-pow(1-min(t/0.85,1),3))*720'"
+            "[bg][ovA]overlay=x='(1-pow(1-min(t/0.45,1),3))*720'"
             ":y=0:eval=frame"
         )
         tafsir_chain = (
             "[2:v]scale=720:1280,format=rgba,"
-            "fade=t=in:st=0.45:d=0.70:alpha=1[ovB];"
+            "fade=t=in:st=%.2f:d=0.35:alpha=1[ovB];" % TAFSIR_STAGGER
         )
         tafsir_merge = (
-            "[o1][ovB]overlay=x='(1-pow(1-min(max(t-0.45,0)/0.80,1),3))*720'"
-            ":y=0:eval=frame"
+            "[o1][ovB]overlay=x='(1-pow(1-min(max(t-%.2f,0)/0.45,1),3))*720'"
+            ":y=0:eval=frame" % TAFSIR_STAGGER
         )
     elif anim == "drop":
         # Descend softly from above, like the mirror of "rise".
         parts.append(
             "[1:v]scale=720:1280,format=rgba,"
-            "fade=t=in:st=0:d=0.75:alpha=1[ovA];"
+            "fade=t=in:st=0:d=0.35:alpha=1[ovA];"
         )
         ayah_merge = (
-            "[bg][ovA]overlay=x=0:y='-pow(1-min(t/0.75,1),3)*90':eval=frame"
+            "[bg][ovA]overlay=x=0:y='-pow(1-min(t/0.45,1),3)*90':eval=frame"
         )
         tafsir_chain = (
             "[2:v]scale=720:1280,format=rgba,"
-            "fade=t=in:st=0.45:d=0.70:alpha=1[ovB];"
+            "fade=t=in:st=%.2f:d=0.35:alpha=1[ovB];" % TAFSIR_STAGGER
         )
         tafsir_merge = (
-            "[o1][ovB]overlay=x=0:y='-pow(1-min(max(t-0.45,0)/0.75,1),3)*70'"
-            ":eval=frame"
+            "[o1][ovB]overlay=x=0:y='-pow(1-min(max(t-%.2f,0)/0.45,1),3)*70'"
+            ":eval=frame" % TAFSIR_STAGGER
         )
     else:  # fade (default)
         parts.append(
             "[1:v]scale=720:1280,format=rgba,"
-            "fade=t=in:st=0:d=0.85:alpha=1[ovA];"
+            "fade=t=in:st=0:d=0.40:alpha=1[ovA];"
         )
         ayah_merge = "[bg][ovA]overlay=x=0:y=0"
         tafsir_chain = (
             "[2:v]scale=720:1280,format=rgba,"
-            "fade=t=in:st=0.40:d=0.85:alpha=1[ovB];"
+            "fade=t=in:st=%.2f:d=0.40:alpha=1[ovB];" % TAFSIR_STAGGER
         )
         tafsir_merge = "[o1][ovB]overlay=x=0:y=0"
 
@@ -1500,34 +1508,31 @@ def build_video(chat_id, ayahs, reciter_id, background_path=None, background_kin
         darkness_value = max(0, min(100, int(background_darkness)))
         brightness = -darkness_value / 100.0
 
-        # Image backgrounds are rendered ONCE as a continuous track,
+        # Video backgrounds are rendered ONCE as a continuous track,
         # so the background never restarts when the ayah changes.
-        # They get a gentle colour lift (saturation + contrast) and a soft
-        # cinematic vignette, and "breathe" with a very slow Ken Burns
-        # zoom, so the frame never looks frozen.
+        # Image backgrounds are now perfectly STATIC (no zoom, no
+        # movement at all); both keep a gentle colour lift and a soft
+        # cinematic vignette.
         background_full = None
 
-        if background_kind == "image":
+        if background_kind == "video":
             if not background_path or not os.path.isfile(background_path):
                 raise RuntimeError("Background ـی هەڵبژێردراو نەدۆزرایەوە.")
 
-            report(14, "ئامادەکردنی پاشبنەمای جوان...")
+            report(14, "ئامادەکردنی پاشبنەمای ڤیدیۆیی...")
 
             background_full = os.path.join(job_dir, "background_full.mp4")
-            bg_frames = int(total_duration * 24) + 2
 
             run_ffmpeg([
                 "ffmpeg", "-y",
+                "-stream_loop", "-1",
                 "-i", background_path,
-                "-vf",
-                "scale=792:1408:force_original_aspect_ratio=increase,"
-                "crop=792:1408,"
-                "zoompan=z='1.05+0.05*sin(on/180)'"
-                ":x='iw/2-(iw/zoom/2)':y='ih/2-(ih/zoom/2)'"
-                ":d=%d:s=720x1280:fps=24,"
-                "eq=brightness=%.2f:saturation=1.14:contrast=1.05,"
-                "vignette=a=PI/5.5,format=yuv420p" % (bg_frames, brightness),
                 "-t", "%.3f" % total_duration,
+                "-vf",
+                "scale=720:1280:force_original_aspect_ratio=increase,"
+                "crop=720:1280,"
+                "eq=brightness=%.2f:saturation=1.14:contrast=1.05,"
+                "vignette=a=PI/5.5,format=yuv420p" % brightness,
                 "-r", "24",
                 "-c:v", "libx264", "-preset", "ultrafast", "-crf", "23",
                 "-an",
@@ -1576,10 +1581,20 @@ def build_video(chat_id, ayahs, reciter_id, background_path=None, background_kin
             if background_kind == "black":
                 bg_input = ["-f", "lavfi", "-i", "color=c=black:s=720x1280:r=24"]
                 bg_chain = "[0:v]eq=brightness=%.2f[bg];" % brightness
+            elif background_kind == "image":
+                # Perfectly STATIC image background: the picture never
+                # moves, zooms or slides — only the text is animated.
+                bg_input = ["-loop", "1", "-framerate", "24", "-i", background_path]
+                bg_chain = (
+                    "[0:v]scale=720:1280:force_original_aspect_ratio=increase,"
+                    "crop=720:1280,"
+                    "eq=brightness=%.2f:saturation=1.14:contrast=1.05,"
+                    "vignette=a=PI/5.5[bg];" % brightness
+                )
             else:
-                # Image & video backgrounds both continue the shared
-                # pre-rendered track exactly where the previous ayah
-                # stopped (no restart between ayahs).
+                # Video backgrounds continue the shared pre-rendered
+                # track exactly where the previous ayah stopped
+                # (no restart between ayahs).
                 bg_input = [
                     "-ss", "%.3f" % segment["bg_offset"],
                     "-i", background_full,
@@ -1674,12 +1689,21 @@ def build_video(chat_id, ayahs, reciter_id, background_path=None, background_kin
 def keyboard_output_modes():
     return {"inline_keyboard": [
         [{"text": "🖼️ ١. پاشبنەمای وێنە", "callback_data": "mode:image"}],
-        [{"text": "⚫ ٢. پاشبنەمای ڕەشی تەواو", "callback_data": "mode:black"}],
+        [{"text": "🎬 ٢. پاشبنەمای ڤیدیۆیی سروشت", "callback_data": "mode:video"}],
+        [{"text": "⚫ ٣. پاشبنەمای ڕەشی تەواو", "callback_data": "mode:black"}],
     ]}
 
 
 def keyboard_backgrounds(kind):
-    # Background video was removed: only the 10 image backgrounds remain.
+    if kind == "video":
+        rows = []
+        for number in range(1, 11):
+            rows.append([{"text": "🎬 ڤیدیۆی سروشت %d" % number,
+                          "callback_data": "background:video:%d" % number}])
+        rows.append([{"text": "📱 هەڵبژاردن لە گەلەری مۆبایل", "callback_data": "gallery:video"}])
+        rows.append([{"text": "👁️ دووبارە پیشاندانی ١٠ ڤیدیۆ", "callback_data": "previews:video"}])
+        return {"inline_keyboard": rows}
+    # Image backgrounds: 1.png..10.png in the repository.
     rows = []
     for number in range(1, 11):
         rows.append([{"text": "🖼️ پاشبنەمای %d" % number,
@@ -1713,21 +1737,23 @@ BACKGROUND_COUNT = 10
 
 
 def resolve_background(kind, number):
-    """Local path of image background number, downloading from GitHub if needed.
+    """Local path of background number, downloading from GitHub if needed.
 
-    Background video was removed from the bot, so only kind="image" exists.
+    Two kinds exist: "image" (1.png..10.png) and "video" (1.mp4..10.mp4)
+    — 10 beautiful nature video backgrounds.
     """
-    if kind != "image" or number not in range(1, BACKGROUND_COUNT + 1):
+    if kind not in ("image", "video") or number not in range(1, BACKGROUND_COUNT + 1):
         raise ValueError("پاشبنەماکە دروست نییە.")
-    local_path = os.path.join(BACKGROUND_DIR, "%d.png" % number)
+    ext = "png" if kind == "image" else "mp4"
+    local_path = os.path.join(BACKGROUND_DIR, "%d.%s" % (number, ext))
     if not os.path.isfile(local_path):
-        url = BACKGROUND_BASE_URL + "%d.png" % number
+        url = BACKGROUND_BASE_URL + "%d.%s" % (number, ext)
         try:
             download_file(url, local_path, min_size=1000)
         except Exception as exc:
             raise RuntimeError(
-                "فایلی %d.png لە GitHub نەدۆزرایەوە. دڵنیابە فایلەکە لە ڕەگی repository ـەکەت بارکراوە. %s"
-                % (number, exc)
+                "فایلی %d.%s لە GitHub نەدۆزرایەوە. دڵنیابە فایلەکە لە ڕەگی repository ـەکەت بارکراوە. %s"
+                % (number, ext, exc)
             )
     return local_path
 
@@ -1755,14 +1781,17 @@ def apply_random_design(chat_id, session):
     settings["text_anim"] = random.choice(TEXT_ANIMS)
     settings["background_darkness"] = random.randint(15, 45)
 
-    # Pick a random image background (1..10) for the user,
-    # so they do not have to choose anything at all.
+    # Pick a random background (image or nature video, 1..10) for the
+    # user, so they do not have to choose anything at all.
     bg_note = ""
     number = random.randint(1, BACKGROUND_COUNT)
+    kind = random.choice(("image", "video"))
     try:
-        session["background_path"] = resolve_background("image", number)
-        session["background_kind"] = "image"
-        bg_note = " • پاشبنەما: 🖼️ وێنە %d • ئەنیمەیشن: %s" % (
+        session["background_path"] = resolve_background(kind, number)
+        session["background_kind"] = kind
+        icon = "🖼️ وێنە" if kind == "image" else "🎬 ڤیدیۆی سروشت"
+        bg_note = " • پاشبنەما: %s %d • ئەنیمەیشن: %s" % (
+            icon,
             number,
             text_anim_label(settings.get("text_anim", "fade")),
         )
@@ -1948,6 +1977,28 @@ def _preview_base_image(session, cache_key):
 
     if kind == "black":
         base = Image.new("RGB", (qv.WIDTH, qv.HEIGHT), (0, 0, 0))
+    elif kind == "video":
+        path = session.get("background_path")
+        if not path or not os.path.isfile(path):
+            base = Image.new("RGB", (qv.WIDTH, qv.HEIGHT), (10, 10, 10))
+        else:
+            os.makedirs(PREVIEW_DIR, exist_ok=True)
+            frame_path = os.path.join(PREVIEW_DIR, "frame_%s.png" % cache_key)
+            if not os.path.isfile(frame_path):
+                subprocess.run(
+                    [
+                        "ffmpeg", "-y",
+                        "-ss", "1",
+                        "-i", path,
+                        "-vf", "scale=720:1280:force_original_aspect_ratio=increase,crop=720:1280",
+                        "-frames:v", "1",
+                        frame_path,
+                    ],
+                    stdout=subprocess.PIPE,
+                    stderr=subprocess.PIPE,
+                    check=True,
+                )
+            base = Image.open(frame_path).convert("RGB")
     else:
         path = session.get("background_path")
         if not path or not os.path.isfile(path):
@@ -2326,20 +2377,36 @@ def handle_message(message):
         )
         return
 
-    # Receive a custom photo from the user's Telegram gallery.
-    # (Background video was removed — only image backgrounds remain.)
+    # Receive a custom photo/video from the user's Telegram gallery.
     if session.get("state") == "await_gallery_upload":
+        mode = session.get("background_kind", "image")
         try:
             os.makedirs(JOBS_DIR, exist_ok=True)
-            photos = message.get("photo") or []
-            if not photos:
-                send_message(chat_id, "تکایە وێنەیەک بنێرە، یان /cancel بنووسە.")
-                return
-            file_id = photos[-1]["file_id"]
-            destination = os.path.join(JOBS_DIR, "bg_%s_custom.jpg" % chat_id)
+            if mode == "image":
+                photos = message.get("photo") or []
+                if not photos:
+                    send_message(chat_id, "تکایە وێنەیەک بنێرە، یان /cancel بنووسە.")
+                    return
+                file_id = photos[-1]["file_id"]
+                destination = os.path.join(JOBS_DIR, "bg_%s_custom.jpg" % chat_id)
+            else:
+                video = message.get("video")
+                if not video:
+                    send_message(chat_id, "تکایە ڤیدیۆیەکی MP4 بنێرە، یان /cancel بنووسە.")
+                    return
+                file_id = video["file_id"]
+                destination = os.path.join(JOBS_DIR, "bg_%s_custom.mp4" % chat_id)
             download_telegram_file(file_id, destination)
+            if mode == "video":
+                probe = subprocess.run(
+                    ["ffprobe", "-v", "error", "-show_entries", "format=duration",
+                     "-of", "default=noprint_wrappers=1:nokey=1", destination],
+                    stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True,
+                )
+                if probe.returncode != 0:
+                    raise RuntimeError("فایلەکە ڤیدیۆیەکی دروستی MP4 نییە.")
             session["background_path"] = destination
-            session["background_kind"] = "image"
+            session["background_kind"] = mode
             session["state"] = "tafsir_choice"
             send_message(chat_id, "✅ پاشبنەماکەت وەرگیرا. ئایا دەتەوێت تەفسیر لە ڤیدیۆکەدا دەرکەوێت؟", keyboard_tafsir())
         except Exception as exc:
@@ -2598,7 +2665,7 @@ def handle_callback(callback):
 
         if data.startswith("previews:"):
             kind = data.split(":", 1)[1]
-            if kind != "image":
+            if kind not in ("image", "video"):
                 raise ValueError("جۆری پاشبنەما دروست نییە.")
             answer_callback(callback_id, "پێشبینینەکان دەنێردرێن")
             send_background_previews(chat_id, kind)
@@ -2606,7 +2673,7 @@ def handle_callback(callback):
 
         if data.startswith("mode:"):
             kind = data.split(":", 1)[1]
-            if kind not in ("image", "black"):
+            if kind not in ("image", "video", "black"):
                 raise ValueError("جۆری پاشبنەما دروست نییە.")
             session = SESSIONS.get(chat_id)
             if not session or session.get("state") != "output_mode":
@@ -2634,17 +2701,20 @@ def handle_callback(callback):
             session = SESSIONS.get(chat_id)
             if not session or session.get("state") != "background_choice":
                 raise ValueError("تکایە /start دووبارە بکە.")
-            if kind != "image":
+            if kind not in ("image", "video"):
                 raise ValueError("جۆری پاشبنەما دروست نییە.")
-            session["background_kind"] = "image"
+            session["background_kind"] = kind
             session["state"] = "await_gallery_upload"
             answer_callback(callback_id)
-            send_message(chat_id, "📱 ئێستا وێنەکەت لە گەلەری بنێرە بۆ بۆتەکە.")
+            noun = "وێنە" if kind == "image" else "ڤیدیۆیەکی MP4"
+            send_message(chat_id, "📱 ئێستا %sەکەت لە گەلەری بنێرە بۆ بۆتەکە." % noun)
             return
 
         if data.startswith("background:"):
             _, kind, raw_number = data.split(":", 2)
             number = int(raw_number)
+            if kind not in ("image", "video"):
+                raise ValueError("جۆری پاشبنەما دروست نییە.")
             session = SESSIONS.get(chat_id)
             if not session or session.get("state") != "background_choice":
                 raise ValueError("تکایە /start دووبارە بکە.")
