@@ -1,9 +1,11 @@
 import os
 import json
+import time
 import random
 import sqlite3
 import urllib.request
 import urllib.parse
+import urllib.error
 import tempfile
 from datetime import datetime
 from zoneinfo import ZoneInfo
@@ -191,32 +193,128 @@ def make_report():
 
 
 # =========================
-# SEND TELEGRAM MESSAGE
+# TELEGRAM API HELPERS
 # =========================
-def send_message(message):
-    url = f"https://api.telegram.org/bot{TOKEN}/sendMessage"
 
-    data = urllib.parse.urlencode({
-        "chat_id": CHANNEL,
-        "text": message,
-        "disable_web_page_preview": "true"
-    }).encode("utf-8")
+def telegram_call(method, payload, timeout=30):
+    """Call the Telegram Bot API and return the full JSON result.
+
+    On HTTP errors the response body is read and included in the raised
+    error, so the Actions log always shows the REAL reason (for example
+    "bot is not a member of the channel chat" instead of a bare 403).
+    """
+    url = f"https://api.telegram.org/bot{TOKEN}/{method}"
+
+    data = urllib.parse.urlencode(payload).encode("utf-8")
 
     request = urllib.request.Request(
         url,
         data=data,
-        headers={
-            "Content-Type": "application/x-www-form-urlencoded"
-        }
+        headers={"Content-Type": "application/x-www-form-urlencoded"}
     )
 
-    with urllib.request.urlopen(request, timeout=30) as response:
-        result = json.loads(response.read().decode("utf-8"))
+    try:
+        with urllib.request.urlopen(request, timeout=timeout) as response:
+            return json.loads(response.read().decode("utf-8"))
 
-    if not result.get("ok"):
+    except urllib.error.HTTPError as error:
+        try:
+            body = error.read().decode("utf-8", "replace")
+        except Exception:
+            body = ""
+
         raise RuntimeError(
-            "Telegram rejected the message: " + str(result)
+            f"Telegram {method} -> HTTP {error.code}: {body[:600]}"
         )
+
+
+# Diagnostics: log who the bot is and whether it may post in the channel.
+# This makes the Actions log immediately show WHY a send could fail.
+def preflight_checks():
+    me = telegram_call("getMe", {})
+
+    if not me.get("ok"):
+        raise RuntimeError("getMe failed: " + str(me))
+
+    bot_id = me["result"].get("id")
+    bot_username = me["result"].get("username", "?")
+
+    print(f"PREFLIGHT: bot @{bot_username} (id={bot_id}) is valid.", flush=True)
+
+    try:
+        chat = telegram_call("getChat", {"chat_id": CHANNEL})
+        print(
+            "PREFLIGHT: channel OK -> "
+            + json.dumps(chat.get("result", {}), ensure_ascii=False)[:300],
+            flush=True,
+        )
+
+        member = telegram_call(
+            "getChatMember",
+            {"chat_id": CHANNEL, "user_id": bot_id},
+        )
+        print(
+            "PREFLIGHT: bot status in channel -> "
+            + json.dumps(member.get("result", {}), ensure_ascii=False)[:300],
+            flush=True,
+        )
+
+    except Exception as error:
+        print(
+            "PREFLIGHT WARNING: channel check failed "
+            "(the bot probably cannot post there): " + str(error),
+            flush=True,
+        )
+
+
+# =========================
+# SEND TELEGRAM MESSAGE (with retries)
+#
+# GitHub Actions runners sometimes get temporary HTTP 403 / network
+# errors from api.telegram.org. Retrying with a backoff for a few
+# minutes makes the daily report survive those transient failures.
+# =========================
+SEND_ATTEMPTS = 8
+SEND_BACKOFF_SECONDS = (15, 30, 45, 60, 60, 60, 60)
+
+
+def send_message(message):
+    payload = {
+        "chat_id": CHANNEL,
+        "text": message,
+        "disable_web_page_preview": "true"
+    }
+
+    last_error = None
+
+    for attempt in range(1, SEND_ATTEMPTS + 1):
+        try:
+            result = telegram_call("sendMessage", payload)
+
+            if not result.get("ok"):
+                raise RuntimeError(
+                    "Telegram rejected the message: " + str(result)
+                )
+
+            return
+
+        except Exception as error:
+            last_error = error
+
+            print(
+                f"SEND ATTEMPT {attempt}/{SEND_ATTEMPTS} FAILED: {error}",
+                flush=True,
+            )
+
+            if attempt < SEND_ATTEMPTS:
+                wait = SEND_BACKOFF_SECONDS[
+                    min(attempt - 1, len(SEND_BACKOFF_SECONDS) - 1)
+                ]
+                time.sleep(wait)
+
+    raise RuntimeError(
+        f"Sending failed after {SEND_ATTEMPTS} attempts: {last_error}"
+    )
 
 
 # =========================
@@ -224,6 +322,8 @@ def send_message(message):
 # =========================
 if __name__ == "__main__":
     try:
+        preflight_checks()
+
         message = make_report()
         send_message(message)
         print("Daily Quran ayah and tafsir sent successfully.")

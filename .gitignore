@@ -1,0 +1,8 @@
+__pycache__/
+*.pyc
+bot_debug.log
+quran_user_jobs/
+reciter_timings/
+quran.db
+user_preferences.json
+*.part
