@@ -291,46 +291,95 @@ def save_text_settings(chat_id, settings):
 
 _MEMBERSHIP_CACHE = {}
 _MEMBERSHIP_LOCK = threading.Lock()
-_MEMBERSHIP_TTL = 600.0  # seconds a membership answer stays valid
+_MEMBERSHIP_TTL = 600.0   # a YES stays valid for 10 minutes (flood protection)
+_NEGATIVE_TTL = 15.0      # a NO only blocks the fast path for 15 seconds
+_LAST_LIVE_CHECK = {}     # user_id -> time of the last real getChatMember call
+_FORCE_MIN_GAP = 3.0      # min seconds between forced live checks per user
+_BOT_ACCESS_ERROR = False # last check failed because the bot cannot see the channel
+_BOT_ACCESS_ALERTS = {}   # chat_id -> last time this chat was told about the problem
 
 
-def is_channel_member(user_id):
+def is_channel_member(user_id, force_check=False):
     """Telegram can reliably check membership when the bot is an admin in the channel.
 
-    Results are cached for 10 minutes per user, so even when MANY users
-    press buttons at the same moment (10+ messages per second) the bot
-    never floods api.telegram.org with getChatMember calls.
+    A YES answer is cached for 10 minutes, so users who already joined
+    never flood api.telegram.org even when they press many buttons.
+
+    A NO answer is only trusted for 15 SECONDS: when a user joins the
+    channel and presses «پشکنین», they must pass immediately instead of
+    staying locked for up to 10 minutes (this was a real bug).
+
+    force_check=True (the «پشکنین» button) always performs a fresh live
+    check, but button mashing is still throttled to one live check per
+    3 seconds per user to protect the Telegram API.
     """
+    global _BOT_ACCESS_ERROR
+
     now = time.time()
 
     with _MEMBERSHIP_LOCK:
         cached = _MEMBERSHIP_CACHE.get(user_id)
 
-        if cached and now - cached[0] < _MEMBERSHIP_TTL:
-            return cached[1]
+        if cached:
+            age = now - cached[0]
+
+            if cached[1]:
+                if age < _MEMBERSHIP_TTL:
+                    return True
+            else:
+                if age < _NEGATIVE_TTL and not force_check:
+                    return False
+
+        if force_check:
+            if now - _LAST_LIVE_CHECK.get(user_id, 0.0) < _FORCE_MIN_GAP:
+                return cached[1] if cached else False
 
     try:
         member = telegram("getChatMember", {
             "chat_id": REQUIRED_CHANNEL,
             "user_id": user_id,
         })
-        status = member.get("status", "")
-        result = status in ("creator", "administrator", "member") or (
-            status == "restricted" and bool(member.get("is_member"))
-        )
     except Exception as exc:
-        log_error("CHANNEL MEMBERSHIP CHECK FAILED | %r" % exc)
+        text = str(exc).lower()
+
+        # These errors mean the BOT (not the user) has a problem:
+        # it is not an admin/member of the channel, so EVERY user
+        # would be locked out no matter if they joined or not.
+        if (
+            "bot is not a member" in text
+            or "channel chat" in text
+            or "chat not found" in text
+            or "not enough rights" in text
+            or "chat_id_invalid" in text
+        ):
+            _BOT_ACCESS_ERROR = True
+            log_error(
+                "BOT CANNOT SEE CHANNEL | add the bot as ADMIN in "
+                + REQUIRED_CHANNEL + " | %r" % exc
+            )
+        else:
+            _BOT_ACCESS_ERROR = False
+            log_error("CHANNEL MEMBERSHIP CHECK FAILED | %r" % exc)
+
         # Network hiccups must not lock members out: trust the last
         # positive answer for one more cache cycle.
         with _MEMBERSHIP_LOCK:
             cached = _MEMBERSHIP_CACHE.get(user_id)
+            _LAST_LIVE_CHECK[user_id] = now
         if cached and cached[1]:
             _MEMBERSHIP_CACHE[user_id] = (now, True)
             return True
         return False
 
+    status = member.get("status", "")
+    result = status in ("creator", "administrator", "member") or (
+        status == "restricted" and bool(member.get("is_member"))
+    )
+
     with _MEMBERSHIP_LOCK:
         _MEMBERSHIP_CACHE[user_id] = (now, result)
+        _LAST_LIVE_CHECK[user_id] = now
+        _BOT_ACCESS_ERROR = False
 
     return result
 
@@ -373,10 +422,29 @@ def send_help(chat_id):
     )
 
 
-def require_channel_membership(chat_id, user_id=None):
+def require_channel_membership(chat_id, user_id=None, force_check=False):
     user_id = chat_id if user_id is None else user_id
-    if is_channel_member(user_id):
+
+    if is_channel_member(user_id, force_check=force_check):
         return True
+
+    if _BOT_ACCESS_ERROR:
+        # The check itself is broken (bot lacks admin rights in the
+        # channel) - no user can ever pass, so tell them the REAL cause
+        # instead of sending them to a channel they already joined.
+        now = time.time()
+
+        if now - _BOT_ACCESS_ALERTS.get(chat_id, 0.0) > 600.0:
+            _BOT_ACCESS_ALERTS[chat_id] = now
+            send_message(
+                chat_id,
+                "⚠️ پشکنینی ئەندامبوون سەرکەوتوو نەبوو (کێشەی تەکنیکی).\n\n"
+                "بۆتەکە ئەدمینی کەناڵەکە نییە: " + REQUIRED_CHANNEL + "\n\n"
+                "چارەسەر: بۆتەکە زیاد بکە وەک ئەدمین لە کەناڵەکە، "
+                "پاشان دوگمەی «پشکنین» دووبارە دابگرە.",
+            )
+        return False
+
     send_message(
         chat_id,
         "🔒 بۆ بەکارهێنانی بۆتەکە، سەرەتا دەبێت ببیتە ئەندامی کەناڵەکەمان.\n\n"
@@ -614,8 +682,21 @@ def telegram(method, data=None, files=None, timeout=120):
                 "409 Conflict: another bot instance is polling"
             )
 
+        # Read the REAL Telegram error description from the response body
+        # (e.g. "Bad Request: bot is not a member of the channel chat") so
+        # problems like "the bot is not admin in the channel" can be
+        # detected and reported instead of showing as a generic error.
+        description = ""
+
+        try:
+            payload = json.loads(exc.read().decode("utf-8", "replace"))
+            description = str(payload.get("description") or "")
+        except Exception:
+            pass
+
         raise RuntimeError(
-            "Telegram API error: " + str(exc)
+            ("Telegram API error: " + str(exc))
+            + (" | " + description if description else "")
         )
 
     except Exception as exc:
@@ -3069,7 +3150,10 @@ def handle_callback(callback):
 
         if data == "join:check":
             user_id = callback.get("from", {}).get("id", chat_id)
-            if require_channel_membership(chat_id, user_id):
+            # force_check=True: the button must ALWAYS ask Telegram for a
+            # fresh answer - a cached "not joined" from seconds ago must
+            # never keep a user who just joined locked out.
+            if require_channel_membership(chat_id, user_id, force_check=True):
                 answer_callback(callback_id, "سوپاس، ئەندامبوون پشتڕاست کرایەوە")
                 start(chat_id, user_id)
             else:
