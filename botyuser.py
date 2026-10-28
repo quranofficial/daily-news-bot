@@ -6,6 +6,7 @@ import sys
 import json
 import time
 import queue
+import base64
 import random
 import hashlib
 import shutil
@@ -542,6 +543,16 @@ RECITERS = load_reciters()
 # TELEGRAM API
 # =========================
 
+class TelegramConflict(RuntimeError):
+    """Raised when getUpdates returns HTTP 409.
+
+    Telegram only allows ONE poller per bot token. When a newer bot
+    instance starts polling (the 24/7 handover), the old instance's
+    getUpdates call fails with 409 - that is the signal for the old
+    instance to finish its in-flight video jobs and exit gracefully.
+    """
+
+
 def telegram(method, data=None, files=None, timeout=120):
     data = data or {}
     url = TG + method
@@ -594,6 +605,18 @@ def telegram(method, data=None, files=None, timeout=120):
             result = json.loads(
                 response.read().decode("utf-8")
             )
+
+    except urllib.error.HTTPError as exc:
+        log_exception("Telegram API error: " + method, exc)
+
+        if exc.code == 409:
+            raise TelegramConflict(
+                "409 Conflict: another bot instance is polling"
+            )
+
+        raise RuntimeError(
+            "Telegram API error: " + str(exc)
+        )
 
     except Exception as exc:
         log_exception("Telegram API error: " + method, exc)
@@ -3558,6 +3581,175 @@ def process_update(update):
 
 
 # =========================
+# 24/7 SELF-CHAINING
+#
+# GitHub Actions jobs have a hard 6-hour limit. Instead of restarting the
+# bot every hour with `schedule` (which killed running video jobs and left
+# offline gaps), the bot now keeps itself alive around the clock:
+#
+#   1. After 5h20m of runtime this instance triggers a FRESH workflow run
+#      through the GitHub API (workflow_dispatch).
+#   2. The fresh instance boots (~3 min of setup) and starts polling.
+#   3. The old instance immediately gets HTTP 409 from getUpdates,
+#      finishes any in-flight video jobs (drain) and exits cleanly.
+#   4. Result: ZERO gap between the two instances and no video is ever
+#      killed mid-render.
+#
+# A separate watchdog workflow (watchdog.yml) additionally checks every
+# 15 minutes that a run is active, and a tiny daily keepalive commit
+# stops GitHub from disabling the scheduled workflows after 60 days of
+# repository inactivity.
+# =========================
+
+GH_TOKEN = os.environ.get("GH_TOKEN", "")
+GH_REPO = os.environ.get("GITHUB_REPOSITORY", "")
+GH_WORKFLOW_FILE = os.environ.get("BOT_WORKFLOW_FILE", "botyuser.yml")
+GH_BRANCH = os.environ.get("BOT_WORKFLOW_BRANCH", "main")
+
+BOT_START_TIME = time.time()
+HANDOVER_AFTER_SECONDS = 5 * 3600 + 20 * 60   # 5h20m -> dispatch the next run
+HARD_EXIT_SECONDS = 5 * 3600 + 40 * 60        # 5h40m -> exit no matter what
+
+_handover_dispatched = False
+_last_dispatch_attempt = 0.0
+_last_keepalive = 0.0
+
+
+def gh_api(path, method="GET", payload=None):
+    """Call the GitHub REST API with the workflow's GITHUB_TOKEN."""
+    url = "https://api.github.com" + path
+
+    data = (
+        json.dumps(payload).encode("utf-8")
+        if payload is not None
+        else None
+    )
+
+    request = urllib.request.Request(
+        url,
+        data=data,
+        method=method,
+        headers={
+            "Authorization": "Bearer " + GH_TOKEN,
+            "Accept": "application/vnd.github+json",
+            "Content-Type": "application/json",
+            "User-Agent": "quran-video-bot",
+        },
+    )
+
+    with urllib.request.urlopen(request, timeout=30) as response:
+        body = response.read().decode("utf-8", "replace")
+
+    return json.loads(body) if body.strip() else {}
+
+
+def dispatch_next_run():
+    """Start a fresh copy of this workflow so the handover is seamless."""
+    try:
+        gh_api(
+            "/repos/%s/actions/workflows/%s/dispatches"
+            % (GH_REPO, GH_WORKFLOW_FILE),
+            method="POST",
+            payload={"ref": GH_BRANCH},
+        )
+        log_error(
+            "HANDOVER | Fresh bot run dispatched; this instance keeps "
+            "polling until the new one takes over (409)."
+        )
+        return True
+
+    except Exception as exc:
+        log_error("HANDOVER | Dispatching the next run failed: %r" % exc)
+        return False
+
+
+def maybe_dispatch_next_run():
+    global _handover_dispatched, _last_dispatch_attempt
+
+    if _handover_dispatched:
+        return
+
+    now = time.time()
+
+    if now - _last_dispatch_attempt < 60:
+        return
+
+    _last_dispatch_attempt = now
+
+    if dispatch_next_run():
+        _handover_dispatched = True
+
+
+def keepalive_commit():
+    """GitHub disables every scheduled workflow after 60 days without any
+    commit activity. A tiny daily commit keeps the whole Actions setup
+    (watchdog + daily report) permanently active."""
+    global _last_keepalive
+
+    if not GH_TOKEN or not GH_REPO:
+        return
+
+    now = time.time()
+
+    if now - _last_keepalive < 20 * 3600:
+        return
+
+    _last_keepalive = now
+    stamp = time.strftime("%Y-%m-%d %H:%M:%S")
+
+    try:
+        body = {
+            "message": "keepalive: " + stamp,
+            "content": base64.b64encode(stamp.encode()).decode(),
+            "branch": GH_BRANCH,
+        }
+
+        try:
+            existing = gh_api(
+                "/repos/%s/contents/keepalive.txt?ref=%s"
+                % (GH_REPO, GH_BRANCH)
+            )
+            body["sha"] = existing["sha"]
+        except Exception:
+            pass  # file does not exist yet -> create it
+
+        gh_api(
+            "/repos/%s/contents/keepalive.txt" % GH_REPO,
+            method="PUT",
+            payload=body,
+        )
+        log_error("KEEPALIVE | Commit created (%s)." % stamp)
+
+    except Exception as exc:
+        log_error("KEEPALIVE | Commit failed: %r" % exc)
+
+
+def drain_active_jobs(max_wait=600):
+    """Wait until every running video job has finished, so a handover
+    never kills a video the user is waiting for."""
+    deadline = time.time() + max_wait
+    announced = False
+
+    while time.time() < deadline:
+        with _ACTIVE_JOBS_LOCK:
+            pending = len(ACTIVE_JOBS)
+
+        if not pending:
+            return
+
+        if not announced:
+            log_error(
+                "HANDOVER | Waiting for %d in-flight video job(s)..."
+                % pending
+            )
+            announced = True
+
+        time.sleep(2)
+
+    log_error("HANDOVER | Drain timeout reached; exiting anyway.")
+
+
+# =========================
 # MAIN LOOP
 # =========================
 
@@ -3612,14 +3804,40 @@ def main():
     # and every guidance message carries an inline 🚀 start button.
     setup_bot_menu()
 
+    # If an old webhook is still set on this bot token, getUpdates can
+    # never work (it fails with 409 forever). Clear it once at startup.
+    try:
+        telegram("deleteWebhook", {})
+    except Exception as exc:
+        log_error("deleteWebhook failed (harmless): " + repr(exc))
+
+    keepalive_commit()
+
     log_error(
         "Bot running; each video is sent only "
         "to its requesting chat."
     )
 
     offset = None
+    conflicts = 0
 
     while True:
+        runtime = time.time() - BOT_START_TIME
+
+        # --- 24/7 handover: shortly before GitHub's 6-hour job limit,
+        # start the NEXT instance and keep polling until it takes over,
+        # so the bot never goes offline and no video is ever killed. ---
+        if runtime >= HANDOVER_AFTER_SECONDS:
+            maybe_dispatch_next_run()
+
+        if runtime >= HARD_EXIT_SECONDS:
+            log_error(
+                "HANDOVER | Hard exit time reached; finishing in-flight "
+                "jobs and stopping this instance."
+            )
+            drain_active_jobs(300)
+            break
+
         try:
             params = {
                 "timeout": POLL_TIMEOUT,
@@ -3638,12 +3856,49 @@ def main():
                 timeout=POLL_TIMEOUT + 10,
             )
 
+            conflicts = 0
+
             for update in updates:
                 offset = update["update_id"] + 1
 
                 # Hand the update to its per-chat worker thread, so a
                 # slow video job for one user never blocks other users.
                 process_update(update)
+
+        except TelegramConflict:
+            # Telegram allows only ONE poller per token. Who should win
+            # depends on the situation (asymmetric rules, so the two
+            # instances can never fight forever):
+            conflicts += 1
+            log_error(
+                "POLL CONFLICT (%d) | another bot instance is polling"
+                % conflicts
+            )
+
+            if runtime >= HANDOVER_AFTER_SECONDS or _handover_dispatched:
+                # Normal 24/7 handover: a fresh instance took over, so
+                # finish the videos that are still rendering and exit.
+                log_error(
+                    "HANDOVER | A newer bot instance took over (409); "
+                    "finishing in-flight jobs and exiting."
+                )
+                drain_active_jobs(600)
+                break
+
+            if conflicts >= 60:
+                # Two young instances kept stealing the poll from each
+                # other for minutes (duplicate run). Give up; the
+                # watchdog will start one clean instance.
+                log_error(
+                    "POLL CONFLICT | Repeated conflicts; finishing "
+                    "in-flight jobs and exiting."
+                )
+                drain_active_jobs(120)
+                break
+
+            # Young instance + no handover yet: take the poll back
+            # (this is how the fresh instance wins the handover).
+            time.sleep(random.uniform(2.0, 5.0))
 
         except KeyboardInterrupt:
             log_error("Bot stopped by keyboard interrupt.")
