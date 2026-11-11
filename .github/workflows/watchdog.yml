@@ -16,20 +16,21 @@ jobs:
       - name: Check bot and restart only when stopped
         env:
           GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
         run: |
           set -euo pipefail
 
           echo "Checking active Quran User Bot runs..."
 
-          active="$(gh run list --workflow botyuser.yml --branch main --status in_progress --json databaseId --jq 'length')"
-          queued="$(gh run list --workflow botyuser.yml --branch main --status queued --json databaseId --jq 'length')"
+          active="$(gh run list --repo "$GH_REPO" --workflow botyuser.yml --branch main --status in_progress --json databaseId --jq 'length')"
+          queued="$(gh run list --repo "$GH_REPO" --workflow botyuser.yml --branch main --status queued --json databaseId --jq 'length')"
 
           echo "Active runs: $active"
           echo "Queued runs: $queued"
 
           if [ "$active" -eq 0 ] && [ "$queued" -eq 0 ]; then
             echo "Bot is not running. Starting a new run..."
-            gh workflow run botyuser.yml --ref main
+            gh workflow run botyuser.yml --ref main --repo "$GH_REPO"
             echo "Restart request sent."
           else
             echo "Bot is already active or queued. No restart needed."
