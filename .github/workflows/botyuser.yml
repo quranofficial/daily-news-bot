@@ -1,17 +1,11 @@
-
 name: Quran User Bot
 
 on:
-  schedule:
-    - cron: "17 * * * *"
   workflow_dispatch:
 
 permissions:
-  contents: read
-
-concurrency:
-  group: quran-user-bot
-  cancel-in-progress: true
+  contents: write
+  actions: write
 
 jobs:
   run-bot:
@@ -20,6 +14,10 @@ jobs:
 
     env:
       BOT_TOKEN: ${{ secrets.BOT_TOKEN }}
+      GH_TOKEN: ${{ github.token }}
+      GITHUB_REPOSITORY: ${{ github.repository }}
+      BOT_WORKFLOW_FILE: botyuser.yml
+      BOT_WORKFLOW_BRANCH: main
       CHANNEL_ID: ""
 
     steps:
